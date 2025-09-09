@@ -102,3 +102,15 @@ python dataset.py \
   --model detr \
   --num-samples 5 \
   --save-dir ./debug_samples/val_clean
+
+# 6) train model
+python train.py \
+  --model retinanet \
+  --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
+  --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
+  --train-images ./data/coco/train2017 \
+  --val-images   ./data/coco/train2017 \
+  --epochs 10 \
+  --batch-size 2 \
+  --albu \
+  --out runs/retinanet_exp1
