@@ -53,9 +53,8 @@ cover/
 
 # ----------------------
 # COCO dataset (prevent git pushing large data)
-data/coco/annotations/*
-data/coco/train2017/*
-data/coco/val2017/*
+data/coco/
+data/coco/*
 !data/coco/.gitkeep
 
 # Translations
