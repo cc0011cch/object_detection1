@@ -62,7 +62,7 @@ Removed grayscale images: 98
 Saved updated annotations to ./data/coco/annotations/instances_val2017_subset_nogray.json
 Final Images: 2797 | Annotations: 12785 | Categories: 3
 
-#split the train set and rename val set to test set
+# 3)split the train set and rename val set to test set
 python tools/split_coco_by_ann.py \
   --train-json ./data/coco/annotations_used/instances_train2017_subset_nogray.json \
   --val-json   ./data/coco/annotations_used/instances_val2017_subset_nogray.json \
@@ -71,6 +71,29 @@ python tools/split_coco_by_ann.py \
   --out-test   ./data/coco/annotations_used/instances_test2017_subset_nogray.json \
   --ratio 0.9 \
   --seed 1337
+
+  [ok] train=58154 imgs, eval=7796 imgs
+cat_id name                  total    train     eval  eval_target
+-----------------------------------------------------------------
+     1 person               252943   221490    31453        25294
+     2 car                   42363    34796     7567         4236
+     3 bus                    5940     4638     1302          594
+
+# 4) make train debug set
+python tools/make_debug_subset.py \
+  --train-json ./data/coco/annotations_used/instances_train2017_split_train.json \
+  --out-json ./data/coco/annotations_used/instances_train2017_debug.json \
+  --samples 30
+
+# Save 8 augmented training-look samples (Albumentations on)
+python dataset.py \
+  --ann-json ./data/coco/annotations_used/instances_train2017_debug.json \
+  --images-dir ./data/coco/train2017 \
+  --model retinanet \
+  --albu \
+  --augment \
+  --num-samples 8 \
+  --save-dir ./debug_samples/train_aug
 
   # Save 5 validation-look samples (no augmentation)
 python dataset.py \
