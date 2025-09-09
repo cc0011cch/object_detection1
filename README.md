@@ -1,2 +1,63 @@
 # object_detection1
 object_detection
+
+
+bash scripts/coco_download.sh data/coco/ --images train val
+---------- Post-download file counts ----------
+train2017  jpg: 118287
+val2017    jpg: 5000
+annotations json: 6
+-----------------------------------------------
+#Train dataset
+# 1) Make a small COCO subset with only person, car, bus
+python tools/coco_make_subset.py \
+  --ann-in ./data/coco/annotations/instances_train2017.json \
+  --cat-names person car bus \
+  --ann-out ./data/coco/annotations/instances_train2017_subset.json \
+  --remap-category-ids
+
+Saved subset to ./data/coco/annotations/instances_train2017_subset.json
+Images: 68339 | Annotations: 312401 | Categories: 3
+
+[Category summary]
+Total categories: 3
+1: person
+2: car
+3: bus
+# 2) Remove grayscale images from that subset
+python tools/coco_remove_grayscale.py \
+  --images-dir ./data/coco/train2017 \
+  --ann-in ./data/coco/annotations/instances_train2017_subset.json \
+  --ann-out ./data/coco/annotations/instances_train2017_subset_nogray.json \
+  --list-out ./data/coco/removed_train_grayscale_ids.txt
+Saved removed image IDs to ./data/coco/removed_train_grayscale_ids.txt
+Removed grayscale images: 2389
+Saved updated annotations to ./data/coco/annotations/instances_train2017_subset_nogray.json
+Final Images: 65950 | Annotations: 301246 | Categories: 3
+
+#Val dataset
+# 1) Make a small COCO subset with only person, car, bus
+python tools/coco_make_subset.py \
+  --ann-in ./data/coco/annotations/instances_val2017.json \
+  --cat-names person car bus \
+  --ann-out ./data/coco/annotations/instances_val2017_subset.json \
+  --remap-category-ids
+Saved subset to ./data/coco/annotations/instances_val2017_subset.json
+Images: 2895 | Annotations: 13221 | Categories: 3
+
+[Category summary]
+Total categories: 3
+1: person
+2: car
+3: bus
+
+# 2) Remove grayscale images from that subset
+python tools/coco_remove_grayscale.py \
+  --images-dir ./data/coco/val2017 \
+  --ann-in ./data/coco/annotations/instances_val2017_subset.json \
+  --ann-out ./data/coco/annotations/instances_val2017_subset_nogray.json \
+  --list-out ./data/coco/removed_val_grayscale_ids.txt
+Saved removed image IDs to ./data/coco/removed_val_grayscale_ids.txt
+Removed grayscale images: 98
+Saved updated annotations to ./data/coco/annotations/instances_val2017_subset_nogray.json
+Final Images: 2797 | Annotations: 12785 | Categories: 3
