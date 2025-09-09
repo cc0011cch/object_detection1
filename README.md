@@ -13,10 +13,10 @@ annotations json: 6
 python tools/coco_make_subset.py \
   --ann-in ./data/coco/annotations/instances_train2017.json \
   --cat-names person car bus \
-  --ann-out ./data/coco/annotations/instances_train2017_subset.json \
+  --ann-out ./data/coco/annotations_used/instances_train2017_subset.json \
   --remap-category-ids
 
-Saved subset to ./data/coco/annotations/instances_train2017_subset.json
+Saved subset to ./data/coco/annotations_used/instances_train2017_subset.json
 Images: 68339 | Annotations: 312401 | Categories: 3
 
 [Category summary]
@@ -27,12 +27,12 @@ Total categories: 3
 # 2) Remove grayscale images from that subset
 python tools/coco_remove_grayscale.py \
   --images-dir ./data/coco/train2017 \
-  --ann-in ./data/coco/annotations/instances_train2017_subset.json \
-  --ann-out ./data/coco/annotations/instances_train2017_subset_nogray.json \
+  --ann-in ./data/coco/annotations_used/instances_train2017_subset.json \
+  --ann-out ./data/coco/annotations_used/instances_train2017_subset_nogray.json \
   --list-out ./data/coco/removed_train_grayscale_ids.txt
 Saved removed image IDs to ./data/coco/removed_train_grayscale_ids.txt
 Removed grayscale images: 2389
-Saved updated annotations to ./data/coco/annotations/instances_train2017_subset_nogray.json
+Saved updated annotations to ./data/coco/annotations_used/instances_train2017_subset_nogray.json
 Final Images: 65950 | Annotations: 301246 | Categories: 3
 
 #Val dataset
@@ -40,9 +40,9 @@ Final Images: 65950 | Annotations: 301246 | Categories: 3
 python tools/coco_make_subset.py \
   --ann-in ./data/coco/annotations/instances_val2017.json \
   --cat-names person car bus \
-  --ann-out ./data/coco/annotations/instances_val2017_subset.json \
+  --ann-out ./data/coco/annotations_used/instances_val2017_subset.json \
   --remap-category-ids
-Saved subset to ./data/coco/annotations/instances_val2017_subset.json
+Saved subset to ./data/coco/annotations_used/instances_val2017_subset.json
 Images: 2895 | Annotations: 13221 | Categories: 3
 
 [Category summary]
@@ -54,10 +54,20 @@ Total categories: 3
 # 2) Remove grayscale images from that subset
 python tools/coco_remove_grayscale.py \
   --images-dir ./data/coco/val2017 \
-  --ann-in ./data/coco/annotations/instances_val2017_subset.json \
-  --ann-out ./data/coco/annotations/instances_val2017_subset_nogray.json \
+  --ann-in ./data/coco/annotations_used/instances_val2017_subset.json \
+  --ann-out ./data/coco/annotations_used/instances_val2017_subset_nogray.json \
   --list-out ./data/coco/removed_val_grayscale_ids.txt
 Saved removed image IDs to ./data/coco/removed_val_grayscale_ids.txt
 Removed grayscale images: 98
 Saved updated annotations to ./data/coco/annotations/instances_val2017_subset_nogray.json
 Final Images: 2797 | Annotations: 12785 | Categories: 3
+
+#split the train set and rename val set to test set
+python tools/split_coco_by_ann.py \
+  --train-json ./data/coco/annotations_used/instances_train2017_subset_nogray.json \
+  --val-json   ./data/coco/annotations_used/instances_val2017_subset_nogray.json \
+  --out-train  ./data/coco/annotations_used/instances_train2017_split_train.json \
+  --out-eval   ./data/coco/annotations_used/instances_train2017_split_eval.json \
+  --out-test   ./data/coco/annotations_used/instances_test2017_subset_nogray.json \
+  --ratio 0.9 \
+  --seed 1337
