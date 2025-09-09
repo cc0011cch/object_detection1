@@ -51,6 +51,12 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# ----------------------
+# COCO dataset (prevent git pushing large data)
+data/coco/
+data/coco/*
+!data/coco/.gitkeep
+
 # Translations
 *.mo
 *.pot
