@@ -71,3 +71,11 @@ python tools/split_coco_by_ann.py \
   --out-test   ./data/coco/annotations_used/instances_test2017_subset_nogray.json \
   --ratio 0.9 \
   --seed 1337
+
+  # Save 5 validation-look samples (no augmentation)
+python dataset.py \
+  --ann-json ./data/coco/annotations_used/instances_test2017_subset_nogray.json \
+  --images-dir ./data/coco/val2017 \
+  --model detr \
+  --num-samples 5 \
+  --save-dir ./debug_samples/val_clean
