@@ -114,3 +114,35 @@ python train.py \
   --batch-size 2 \
   --albu \
   --out runs/retinanet_exp1
+
+  # Warm start: freeze backbone for 3 epochs, then unfreeze with small LR
+python train.py \
+  --model retinanet \
+  --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
+  --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
+  --train-images ./data/coco/train2017 \
+  --val-images   ./data/coco/train2017 \
+  --epochs 10 \
+  --batch-size 2 \
+  --head-lr 1e-3 \
+  --backbone-lr 1e-4 \
+  --freeze-backbone-epochs 3 \
+  --freeze-bn-when-frozen \
+  --albu \
+  --out runs/retina_freeze3 \
+  --eval-map-every 1
+
+# DETR with smaller backbone LR, no freezing
+python train.py \
+  --model detr \
+  --train-ann ./data/instances_train2017_split_train.json \
+  --val-ann   ./data/instances_train2017_split_eval.json \
+  --train-images ./data/coco/train2017 \
+  --val-images   ./data/coco/train2017 \
+  --epochs 10 \
+  --batch-size 2 \
+  --head-lr 1e-4 \
+  --backbone-lr 1e-5 \
+  --albu \
+  --out runs/detr_head_backbone_lrs \
+  --eval-map-every 1

@@ -5,6 +5,10 @@ name = "pypi"
 
 [packages]
 matplotlib = "*"
+tensorboard = "*"
+transformers = "*"
+albumentations = "*"
+pycocotools = "*"
 
 [dev-packages]
 
