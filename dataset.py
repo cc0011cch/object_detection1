@@ -122,6 +122,7 @@ class CocoDetDataset(Dataset):
         self._target_size = None  # set via set_target_size()
 
         if self.use_albu:
+            print("use_albu: {}".format(albu_strength) )
             self._albu = self._build_albu(albu_strength, augment)
         else:
             # IMPORTANT: no geometric ops here (to keep boxes correct); we handle resize manually.
@@ -138,6 +139,7 @@ class CocoDetDataset(Dataset):
             ops = []
         else:
             if strength == "medium":
+                print("medium")
                 ops = [
                     A.HorizontalFlip(p=0.5),
                     A.RandomBrightnessContrast(p=0.5),
@@ -325,7 +327,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="COCO dataset visualizer/debugger")
     ap.add_argument("--images", required=True, help="Path to images dir (e.g., ./data/coco/train2017)")
     ap.add_argument("--ann", required=True, help="Path to COCO annotations JSON")
-    ap.add_argument("--model-family", choices=["retinanet", "detr"], default="retinanet")
     ap.add_argument("--augment", action="store_true")
     ap.add_argument("--use-albu", action="store_true")
     ap.add_argument("--albu-strength", choices=["light", "medium"], default="light")

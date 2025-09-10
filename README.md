@@ -116,22 +116,22 @@ python tools/make_debug_subset.py \
 ### Training samples (Albumentations ON)
 
 python dataset.py \
-  --ann-json ./data/coco/annotations_used/instances_train2017_debug.json \
-  --images-dir ./data/coco/train2017 \
-  --model retinanet \
-  --albu \
+  --ann ./data/coco/annotations_used/instances_train2017_debug500.json \
+  --images ./data/coco/train2017 \
   --augment \
-  --num-samples 8 \
-  --save-dir ./debug_samples/train_aug  
+  --use-albu \
+  --albu-strength medium \
+  --target-size 512 \
+  --num 8 \
+  --out-dir ./debug_samples/train500_aug  
 
 ### Validation samples (clean)
 
 python dataset.py \
-  --ann-json ./data/coco/annotations_used/instances_test2017_subset_nogray.json \
-  --images-dir ./data/coco/val2017 \
-  --model detr \
-  --num-samples 5 \
-  --save-dir ./debug_samples/val_clean  
+  --ann ./data/coco/annotations_used/instances_test2017_subset_nogray.json \
+  --images ./data/coco/val2017 \
+  --num 5 \
+  --out-dir ./debug_samples/val_clean  
 
 ---
 
@@ -287,8 +287,17 @@ python export_retinanet_onnx.py \
   --device cuda \
   --dynamo
 
+## 10 onnx evaluation
+python evaluate_test.py \
+  --backend onnx \
+  --onnx runs/retina_rfs001/retinanet_head.onnx \
+  --test-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json \
+  --test-images ./data/coco/train2017 \
+  --batch-size 8 --num-workers 4 \
+  --resize-short 512 \
+  --pr-plot runs/retina_rfs001/pr_curves_iou50Val_onnx.jpg
 
-## 10. TensorBoard (with Remote Access)
+## 11. TensorBoard (with Remote Access)
 
 On EC2 instance:  
 tensorboard --logdir=data/model --port=8080  
