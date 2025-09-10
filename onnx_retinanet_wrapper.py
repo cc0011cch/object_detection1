@@ -16,15 +16,29 @@ class ONNXRetinaNetWrapper:
     def __init__(self, onnx_path: str, providers=None, class_ids=None,
                  score_thresh: float = 0.3, iou_thresh: float = 0.5):
         # Prefer CUDA if present; else CPU
-        providers = providers or ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        requested  = providers or ["CUDAExecutionProvider", "CPUExecutionProvider"]
         available = ort.get_available_providers()
+
+        # CUDA EP options (safe defaults)
+        cuda_options = {
+            "device_id": 0,
+            "arena_extend_strategy": "kNextPowerOfTwo",
+            "cudnn_conv_algo_search": "DEFAULT",
+            "do_copy_in_default_stream": True,
+        }
+        # Build the providers list with options where applicable
         chosen = []
-        for p in providers:
+        for p in requested :
             if p in available:
                 chosen.append(p)
         if not chosen:
             chosen = ["CPUExecutionProvider"]
         self.sess = ort.InferenceSession(onnx_path, providers=chosen)
+
+        # Debug prints (visible once at init)
+        print("[onnxruntime] requested providers:", requested)
+        print("[onnxruntime] available providers:", available)
+        print("[onnxruntime] using providers:", self.sess.get_providers())        
 
         self.class_ids = class_ids or list(range(1, 2))  # default: 1 class with id=1
         self.num_classes = len(self.class_ids)

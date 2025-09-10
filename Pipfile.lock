@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "9654de7356ec597627cd985988955ec3708ddbdd907153370f713aaa81531a0b"
+            "sha256": "99f976b58e2ef4ec91baf1e9d047663e83ebade5d23226431b575a08ca527a6c"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -943,31 +943,6 @@
             ],
             "markers": "python_version >= '3.9'",
             "version": "==0.1.8"
-        },
-        "onnxruntime": {
-            "hashes": [
-                "sha256:01e2f21b2793eb0c8642d2be3cee34cc7d96b85f45f6615e4e220424158877ce",
-                "sha256:2d39a530aff1ec8d02e365f35e503193991417788641b184f5b1e8c9a6d5ce8d",
-                "sha256:33a7980bbc4b7f446bac26c3785652fe8730ed02617d765399e89ac7d44e0f7d",
-                "sha256:460487d83b7056ba98f1f7bac80287224c31d8149b15712b0d6f5078fcc33d0f",
-                "sha256:6a64291d57ea966a245f749eb970f4fa05a64d26672e05a83fdb5db6b7d62f87",
-                "sha256:6e7e823624b015ea879d976cbef8bfaed2f7e2cc233d7506860a76dd37f8f381",
-                "sha256:70980d729145a36a05f74b573435531f55ef9503bcda81fc6c3d6b9306199982",
-                "sha256:7ae7526cf10f93454beb0f751e78e5cb7619e3b92f9fc3bd51aa6f3b7a8977e5",
-                "sha256:80e7f51da1f5201c1379b8d6ef6170505cd800e40da216290f5e06be01aadf95",
-                "sha256:984cea2a02fcc5dfea44ade9aca9fe0f7a8a2cd6f77c258fc4388238618f3928",
-                "sha256:a938d11c0dc811badf78e435daa3899d9af38abee950d87f3ab7430eb5b3cf5a",
-                "sha256:b0c37070268ba4e02a1a9d28560cd00cd1e94f0d4f275cbef283854f861a65fa",
-                "sha256:b89ddfdbbdaf7e3a59515dee657f6515601d55cb21a0f0f48c81aefc54ff1b73",
-                "sha256:bddc75868bcf6f9ed76858a632f65f7b1846bdcefc6d637b1e359c2c68609964",
-                "sha256:d29c7d87b6cbed8fecfd09dca471832384d12a69e1ab873e5effbb94adc3e966",
-                "sha256:f28a42bb322b4ca6d255531bb334a2b3e21f172e37c1741bd5e66bc4b7b61f03",
-                "sha256:f4581bccb786da68725d8eac7c63a8f31a89116b8761ff8b4989dc58b61d49a0",
-                "sha256:f6effa1299ac549a05c784d50292e3378dbbf010346ded67400193b09ddc2f04"
-            ],
-            "index": "pypi",
-            "markers": "python_version >= '3.10'",
-            "version": "==1.22.1"
         },
         "onnxruntime-gpu": {
             "hashes": [
