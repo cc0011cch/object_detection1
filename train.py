@@ -313,6 +313,100 @@ def build_imgid_list_for_dataset(ds) -> List[int]:
         img_ids.append(int(t["image_id"]))
     return img_ids
 
+# Evaluator that returns COCO AP + Macro-mAP
+import numpy as np
+from pycocotools.coco import COCO       # you already import in final eval
+from pycocotools.cocoeval import COCOeval
+
+@torch.no_grad()
+def coco_map_with_macro(model_name, model, dl_val, ds_val, device, predict_batch_fn, val_ann_path,
+                        max_batches=None):
+    """
+    Returns: dict with AP, AP50, AP75, macro_mAP, macro_AP50, per-class dicts.
+    """
+    detections = []
+    cat_ids_sorted = sorted([c["id"] for c in ds_val.categories])
+
+    # (For DETR: use processor postprocess like your final eval block.)
+    proc = None
+    if model_name == "detr":
+        from transformers import DetrImageProcessor
+        proc = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+
+    for bidx, (images, targets) in enumerate(dl_val):
+        if max_batches is not None and bidx >= max_batches:
+            break
+        img_ids = [int(t["image_id"].item()) for t in targets]
+
+        if model_name == "retinanet":
+            batch_dets = predict_batch_fn(images, img_ids)
+        else:
+            model.eval()
+            np_imgs = [(img.permute(1, 2, 0).clamp(0, 1).mul(255).byte().cpu().numpy()) for img in images]
+            enc = proc(images=np_imgs, return_tensors="pt")
+            enc["pixel_values"] = enc["pixel_values"].to(device)
+            if "pixel_mask" in enc:
+                enc["pixel_mask"] = enc["pixel_mask"].to(device)
+            outputs = model(**enc)
+            sizes = [(ds_val.imgid_to_img[i]["height"], ds_val.imgid_to_img[i]["width"]) for i in img_ids]
+            processed = proc.post_process_object_detection(outputs, target_sizes=torch.tensor(sizes, device=device))
+            batch_dets = []
+            for img_id, p in zip(img_ids, processed):
+                boxes = p["boxes"].detach().cpu().numpy()
+                scores = p["scores"].detach().cpu().numpy()
+                labels = p["labels"].detach().cpu().numpy()
+                for (x1, y1, x2, y2), s, l in zip(boxes, scores, labels):
+                    cat_id = cat_ids_sorted[int(l)]
+                    batch_dets.append({
+                        "image_id": int(img_id),
+                        "category_id": int(cat_id),
+                        "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
+                        "score": float(s),
+                    })
+
+        detections.extend(batch_dets)
+
+    coco_gt = COCO(val_ann_path)
+    if len(detections) == 0:
+        return None
+
+    coco_dt = coco_gt.loadRes(detections)
+    coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
+    coco_eval.evaluate(); coco_eval.accumulate()
+
+    # Overall COCO stats
+    ap, ap50, ap75, aps, apm, apl, ar1, ar10, ar100, ars, arm, arl = map(float, coco_eval.stats)
+
+    # Per-class PR tensor: [T, R, K, A, M]
+    precisions = coco_eval.eval["precision"]
+    a = 0
+    m = 2 if precisions.shape[-1] >= 3 else precisions.shape[-1] - 1
+    iou_thrs = coco_eval.params.iouThrs
+    t50 = int(np.argmin(np.abs(iou_thrs - 0.50)))
+
+    id_to_name = {c["id"]: c["name"] for c in coco_gt.loadCats(coco_gt.getCatIds())}
+    per_class_ap, per_class_ap50 = {}, {}
+
+    for k_idx, cat_id in enumerate(coco_eval.params.catIds):
+        pr = precisions[:, :, k_idx, a, m]
+        pr = pr[pr > -1]
+        per_class_ap[cat_id] = float(np.mean(pr)) if pr.size > 0 else float("nan")
+
+        pr50 = precisions[t50, :, k_idx, a, m]
+        pr50 = pr50[pr50 > -1]
+        per_class_ap50[cat_id] = float(np.mean(pr50)) if pr50.size > 0 else float("nan")
+
+    macro_map  = float(np.nanmean(list(per_class_ap.values()))) if per_class_ap else float("nan")
+    macro_ap50 = float(np.nanmean(list(per_class_ap50.values()))) if per_class_ap50 else float("nan")
+
+    return {
+        "AP": ap, "AP50": ap50, "AP75": ap75,
+        "APS": aps, "APM": apm, "APL": apl,
+        "macro_mAP": macro_map, "macro_AP50": macro_ap50,
+        "per_class_ap":   {id_to_name[c]: per_class_ap[c]   for c in per_class_ap},
+        "per_class_ap50": {id_to_name[c]: per_class_ap50[c] for c in per_class_ap50},
+    }
+
 
 # -------------------- Models & helpers -------------------- #
 def build_model_and_helpers(
@@ -550,6 +644,17 @@ def main():
     ap.add_argument("--rfsAlpha", type=float, default=0.5,
                     help="Exponent alpha for RFS (LVIS uses 0.5 for sqrt).")
     # -------------------------
+
+    # === Metric evaluation controls ===
+    ap.add_argument("--eval-map-every", type=int, default=0,
+                    help="If >0, compute COCO mAP/Macro-mAP every N epochs (costly). 0=only at the very end.")
+    ap.add_argument("--eval-map-max-batches", type=int, default=None,
+                    help="Cap #val batches used for mAP each epoch (speed/debug). None=all.")
+    ap.add_argument("--early-metric", choices=["val_loss", "coco_ap", "macro_map", "macro_ap50"],
+                    default="val_loss",
+                    help="Metric used to select best checkpoint & early stop.")
+    # -------------------------
+
 
     # ---- logging flags (added) ----
     ap.add_argument("--log-file", default="", help="Path to save logs (in addition to console).")
@@ -884,14 +989,48 @@ def main():
 
         # Val loss (fp32) — keep your previous customization here if needed
 #        val_loss = 21.0
+        # ----- Val loss (fp32) -----
         val_loss = evaluate_loss(dl_val, lambda im, tg: val_forward(im, tg), device, max_batches=args.max_val_batches)
         writer.add_scalar("val/loss_epoch", val_loss, epoch)
         LOG(f"[Eval] Epoch {epoch+1} finished. train_loss={train_epoch_loss:.4f}, val_loss={val_loss:.4f}")
 
-        # Save / early stop
-        is_best = val_loss < best_val
+        # ----- Optional COCO metrics this epoch -----
+        metrics = None
+        do_map_now = (args.eval_map_every and ((epoch + 1) % args.eval_map_every == 0))
+        if do_map_now:
+            metrics = coco_map_with_macro(
+                model_name=args.model,
+                model=model,
+                dl_val=dl_val,
+                ds_val=ds_val,
+                device=device,
+                predict_batch_fn=predict_batch,
+                val_ann_path=args.val_ann,
+                max_batches=args.eval_map_max_batches,
+            )
+            if metrics is not None:
+                LOG(f"[COCO@epoch] AP={metrics['AP']:.4f} AP50={metrics['AP50']:.4f} "
+                    f"Macro-mAP={metrics['macro_mAP']:.4f} Macro-AP50={metrics['macro_AP50']:.4f}")
+                writer.add_scalar("val/coco_AP", metrics["AP"], epoch)
+                writer.add_scalar("val/coco_AP50", metrics["AP50"], epoch)
+                writer.add_scalar("val/macro_mAP", metrics["macro_mAP"], epoch)
+                writer.add_scalar("val/macro_AP50", metrics["macro_AP50"], epoch)
+
+        # ----- Decide “best” / early-stop metric -----
+        metric_now = val_loss
+        metric_name = "val_loss"
+        if metrics is not None:
+            if args.early_metric == "coco_ap":
+                metric_now = -metrics["AP"];        metric_name = "COCO_AP"
+            elif args.early_metric == "macro_map":
+                metric_now = -metrics["macro_mAP"]; metric_name = "Macro_mAP"
+            elif args.early_metric == "macro_ap50":
+                metric_now = -metrics["macro_AP50"]; metric_name = "Macro_AP50"
+
+        # Keep the best (minimize metric_now; mAP is negated above to maximize)
+        is_best = metric_now < best_val
         if is_best:
-            best_val = val_loss
+            best_val = metric_now
             best_epoch = epoch + 1
             epochs_no_improve = 0
         else:
@@ -905,6 +1044,7 @@ def main():
                 "scheduler": scheduler.state_dict() if scheduler is not None else None,
                 "best_val": best_val,
                 "best_epoch": best_epoch,
+                "best_metric_name": metric_name,
                 "args": vars(args),
             },
             out_dir=out_dir,
@@ -912,8 +1052,10 @@ def main():
         )
 
         if patience is not None and epochs_no_improve >= patience:
-            LOG(f"[early stop] No improvement for {patience} epochs. Best val loss={best_val:.4f} (epoch {best_epoch})")
+            best_readable = best_val if metric_name == "val_loss" else -best_val
+            LOG(f"[early stop] No improvement for {patience} epochs. Best {metric_name}={best_readable:.4f} (epoch {best_epoch})")
             break
+
 
     # -------- Final mAP: best checkpoint only --------
     if COCO_EVAL_AVAILABLE:

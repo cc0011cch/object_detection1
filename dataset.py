@@ -122,7 +122,6 @@ class CocoDetDataset(Dataset):
         self._target_size = None  # set via set_target_size()
 
         if self.use_albu:
-            print("use_albu: {}".format(albu_strength) )
             self._albu = self._build_albu(albu_strength, augment)
         else:
             # IMPORTANT: no geometric ops here (to keep boxes correct); we handle resize manually.
@@ -139,7 +138,6 @@ class CocoDetDataset(Dataset):
             ops = []
         else:
             if strength == "medium":
-                print("medium")
                 ops = [
                     A.HorizontalFlip(p=0.5),
                     A.RandomBrightnessContrast(p=0.5),

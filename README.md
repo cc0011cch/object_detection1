@@ -145,9 +145,10 @@ python train.py \
   --val-ann   ./data/coco/annotations_used/instances_train2017_valdebug50.json \
   --train-images ./data/coco/train2017 \
   --val-images ./data/coco/train2017 \
-  --epochs 1 --batch-size 2 --resize-short 512 \
-  --num-workers 4 --rfs 0.001 --rfsAlpha 0.75 \
+  --epochs 1 --batch-size 4 --resize-short 800 \
+  --num-workers 4 --rfs 0.001 --rfsAlpha 0.5 \
   --max-train-batches 10 --max-val-batches 5 \
+  --eval-map-every 3 --eval-map-max-batches 50 --early-metric macro_map \
   --out runs/sanity_rfs_cache  
 
 ### (b) RetinaNet (full run)
@@ -159,18 +160,22 @@ python train.py \
   --val-ann   ./data/coco/annotations_used/instances_train2017_valdebug50.json \
   --train-images ./data/coco/train2017 \
   --val-images   ./data/coco/train2017 \
-  --epochs 16 --batch-size 8 --accum-steps 2 \
-  --num-workers 8 --prefetch-factor 4 --persistent-workers \
-  --resize-short 512 \
+  --epochs 16 --batch-size 6 --accum-steps 4 \
+  --num-workers 2 --prefetch-factor 2 \
+  --resize-short 640 \
   --albu --albu-strength medium \
   --head-lr 5e-4 --backbone-lr 5e-5 --weight-decay 1e-4 \
   --freeze-backbone-epochs 1 --freeze-bn-when-frozen \
   --warmup-steps 300 \
   --rfs 0.001 --rfsAlpha 0.75 \
+  --eval-map-every 1 \
+  --eval-map-max-batches 50 \
+  --early-metric macro_map \
   --print-freq 20 \
-  --log-file runs/retina/train1.log \
+  --eval-map-every 3 --eval-map-max-batches 50 --early-metric macro_map \
+  --log-file runs/retina/train2.log \
   --log-console \
-  --out runs/retina_rfs001  
+  --out runs/retina_rfs002 
 
 ### (b2) RetinaNet (resume)
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
@@ -194,30 +199,7 @@ python train.py \
   --log-console \
   --out runs/retina_rfs001  
 
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-python train.py ... \
-  --num-workers 0 --prefetch-factor 2 \
-  --persistent-workers   # (ignored when workers=0)
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-python train.py \
-  --model retinanet \
-  --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json \
-  --val-ann   ./data/coco/annotations_used/instances_train2017_valdebug50.json \
-  --train-images ./data/coco/train2017 \
-  --val-images   ./data/coco/train2017 \
-  --epochs 16 --batch-size 8 --accum-steps 2 \
-  --num-workers 0 \
-  --resize-short 512 \
-  --albu --albu-strength medium \
-  --head-lr 5e-4 --backbone-lr 5e-5 --weight-decay 1e-4 \
-  --freeze-backbone-epochs 1 --freeze-bn-when-frozen \
-  --warmup-steps 300 \
-  --rfs 0.001 --rfsAlpha 0.75 \
-  --resume ./runs/retina_rfs001/last.pth \
-  --print-freq 20 \
-  --log-file runs/retina/train1.log \
-  --log-console \
-  --out runs/retina_rfs001
+
 
 ### (c) Debugging run
 
