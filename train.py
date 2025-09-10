@@ -882,9 +882,9 @@ def main():
                 pass
 
         # Val loss (fp32) — keep your previous customization here if needed
-        val_loss = 21.0
-        # val_loss = evaluate_loss(dl_val, lambda im, tg: val_forward(im, tg), device, max_batches=args.max_val_batches)
-        # writer.add_scalar("val/loss_epoch", val_loss, epoch)
+#        val_loss = 21.0
+        val_loss = evaluate_loss(dl_val, lambda im, tg: val_forward(im, tg), device, max_batches=args.max_val_batches)
+        writer.add_scalar("val/loss_epoch", val_loss, epoch)
         LOG(f"[Eval] Epoch {epoch+1} finished. train_loss={train_epoch_loss:.4f}, val_loss={val_loss:.4f}")
 
         # Save / early stop
