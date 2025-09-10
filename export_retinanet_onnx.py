@@ -1,143 +1,179 @@
 #!/usr/bin/env python3
 """
-Export a trained torchvision RetinaNet to ONNX.
-
-Outputs (pre-NMS):
-  - cls_logits:   [B, N, C]    (raw logits)
-  - bbox_deltas:  [B, N, 4]    (dx,dy,dw,dh)
-  - anchors_xyxy: [B, N, 4]    (x1,y1,x2,y2)
-
-Assumptions:
-  - Input is ImageNet-normalized float32 tensor in [B,3,H,W], H,W divisible by 32.
-  - We reconstruct the model exactly like training via train.py's helper.
-
-Usage:
-  python export_retinanet_onnx.py \
-      --ckpt runs/retina_rfs001/best.pth \
-      --out retinanet_head.onnx \
-      --num-classes 3 \
-      --img-size 512 \
-      --opset 17 \
-      --device cuda
-
-Then run ONNX Runtime with CPU or CUDA providers.
+Export a trained torchvision RetinaNet to ONNX (pre-NMS).
+Outputs:
+  - cls_logits:   [B, N, C]
+  - bbox_deltas:  [B, N, 4]
+  - anchors_xyxy: [B, N, 4]
 """
 import argparse
-from pathlib import Path
-from typing import List, Tuple
-
+from typing import List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.onnx
 import torchvision
 
-# Reuse your training builder so num_classes & head wiring match your run
-from train import build_model_and_helpers  # :contentReference[oaicite:1]{index=1}
-
+from train import build_model_and_helpers  # uses your training wiring  :contentReference[oaicite:1]{index=1}
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD  = (0.229, 0.224, 0.225)
 
+TensorOrList = Union[torch.Tensor, List[torch.Tensor]]
 
 class RetinaNetHeadExport(nn.Module):
-    """
-    Wrap torchvision RetinaNet to export pre-NMS predictions + anchors.
-
-    - Normalizes input with ImageNet mean/std (same as torchvision transform)
-    - Runs backbone + FPN + head
-    - Flattens per-level outputs and concatenates
-    - Generates anchors using model.anchor_generator given feature maps & input size
-    """
     def __init__(self, model: torchvision.models.detection.RetinaNet, num_classes: int):
         super().__init__()
         self.backbone = model.backbone
         self.head = model.head
         self.anchor_gen = model.anchor_generator
         self.num_classes = num_classes
-        # Register constants so ONNX sees them
         self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1,3,1,1), persistent=False)
         self.register_buffer("std",  torch.tensor(IMAGENET_STD).view(1,3,1,1),  persistent=False)
+
+    def _extract_head(self, head_out):
+        """
+        Support both:
+          - (cls_list, bbox_list)
+          - {'cls_logits': ..., 'bbox_regression': ...} (values may be list OR tensor)
+        Returns (cls_out, reg_out) where each is either a list[Tensor] or a Tensor.
+        """
+        if isinstance(head_out, (list, tuple)) and len(head_out) == 2:
+            return head_out[0], head_out[1]
+
+        if isinstance(head_out, dict):
+            # classification
+            if "cls_logits" in head_out:
+                cls_out = head_out["cls_logits"]
+            elif "classification" in head_out:
+                cls_out = head_out["classification"]
+            elif "logits" in head_out:
+                cls_out = head_out["logits"]
+            else:
+                raise RuntimeError(f"Cannot find classification logits in head dict keys: {list(head_out.keys())}")
+
+            # regression
+            if "bbox_regression" in head_out:
+                reg_out = head_out["bbox_regression"]
+            elif "regression" in head_out:
+                reg_out = head_out["regression"]
+            elif "bbox_deltas" in head_out:
+                reg_out = head_out["bbox_deltas"]
+            else:
+                raise RuntimeError(f"Cannot find bbox regression in head dict keys: {list(head_out.keys())}")
+            return cls_out, reg_out
+
+        raise RuntimeError(f"Unsupported head output type: {type(head_out)}")
+
+    def _as_list_4d(self, x: TensorOrList) -> List[torch.Tensor]:
+        """
+        Normalize head output to a list of 4D maps [B, AX, H, W] when possible.
+        If the output is already flattened [B,N,X] or [N,X], return [] to signal 'use passthrough'.
+        """
+        if isinstance(x, list):
+            if all(t.dim() == 4 for t in x):
+                return x
+            # already-flattened per level (rare) -> treat as passthrough below
+            return []
+        if isinstance(x, torch.Tensor):
+            if x.dim() == 4:
+                return [x]   # single level
+            # 3D or 2D -> already flattened
+            return []
+        return []
 
     def _concat_levels(self, xs: List[torch.Tensor], A_times: int) -> torch.Tensor:
         """
         xs: list of [B, A*X, H, W]
-        For cls: X=C, for bbox: X=4.
-        We rearrange to [B, H*W*A, X] and concat over levels.
+        Returns [B, N, X]
         """
         outs = []
         for x in xs:
+            # x is 4D guaranteed here
             B, AX, H, W = x.shape
-            A = A_times  # anchors per location (e.g., 9)
+            A = A_times
             X = AX // A
             x = x.view(B, A, X, H, W).permute(0, 3, 4, 1, 2).contiguous()  # [B,H,W,A,X]
-            x = x.view(B, H * W * A, X)  # [B,N_level,X]
+            x = x.view(B, H * W * A, X)                                    # [B,N_level,X]
             outs.append(x)
-        return torch.cat(outs, dim=1)  # [B, N_sum, X]
+        return torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
 
-    def forward(self, images: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Normalize (same as torchvision GeneralizedRCNNTransform does)
-        x = (images - self.mean) / self.std  # [B,3,H,W]
+    def _passthrough_flattened(self, x: torch.Tensor, X_expected: int, B: int) -> torch.Tensor:
+        """
+        Accept [B,N,X] or [N,X] (with B==1) and return [B,N,X].
+        """
+        if x.dim() == 3:
+            Bx, N, X = x.shape
+            assert X == X_expected, f"Expected last dim {X_expected}, got {X}"
+            return x
+        if x.dim() == 2:
+            # assume batch=1
+            N, X = x.shape
+            assert X == X_expected, f"Expected last dim {X_expected}, got {X}"
+            assert B == 1, "Got 2D head output but batch>1; cannot infer batch dimension."
+            return x.unsqueeze(0)  # [1,N,X]
+        raise RuntimeError(f"Unsupported flattened head tensor shape: {tuple(x.shape)}")
 
-        # Backbone + FPN (OrderedDict of feature maps)
+    def forward(self, images: torch.Tensor):
+        # Normalize like torchvision transform
+        x = (images - self.mean) / self.std
+
+        # Features
         features = self.backbone(x)
-        if isinstance(features, dict):
-            feats = list(features.values())
+        feats = list(features.values()) if isinstance(features, dict) else [features]
+
+        # Head (could be list-of-4D, or flattened tensors)
+        head_out = self.head(feats)
+        cls_out, reg_out = self._extract_head(head_out)
+
+        # Try classic path (list of 4D maps)
+        cls_list = self._as_list_4d(cls_out)
+        reg_list = self._as_list_4d(reg_out)
+
+        if cls_list and reg_list:
+            # infer A from channels
+            ch = cls_list[0].shape[1]
+            if (ch % self.num_classes) != 0:
+                raise RuntimeError(f"Channels ({ch}) not divisible by num_classes ({self.num_classes}).")
+            A = ch // self.num_classes
+            cls_logits  = self._concat_levels(cls_list, A_times=A)  # [B,N,C]
+            bbox_deltas = self._concat_levels(reg_list, A_times=A)  # [B,N,4]
         else:
-            feats = [features]
+            # flattened outputs already: expect [B,N,C] and [B,N,4] (or [N,C]/[N,4] when B=1)
+            B = images.shape[0]
+            # try to get C and verify
+            if isinstance(cls_out, list) and len(cls_out) == 1:
+                cls_out = cls_out[0]
+            if isinstance(reg_out, list) and len(reg_out) == 1:
+                reg_out = reg_out[0]
+            cls_logits  = self._passthrough_flattened(cls_out, X_expected=self.num_classes, B=B)
+            bbox_deltas = self._passthrough_flattened(reg_out, X_expected=4,               B=B)
 
-        # Head
-        cls_logits_list, bbox_deltas_list = self.head(feats)
-
-        # Infer anchors-per-location A from cls head channels
-        # Each cls map has shape [B, A*C, H, W] → A = channels // C
-        A = cls_logits_list[0].shape[1] // self.num_classes
-
-        # Flatten & concat levels
-        cls_logits = self._concat_levels(cls_logits_list, A_times=A)  # [B, N, C]
-        bbox_deltas = self._concat_levels(bbox_deltas_list, A_times=A)  # [B, N, 4]
-
-        # Anchors for each image (use input image size for generator)
-        B, _, H, W = images.shape
-        # anchor_generator expects feature maps list + image_size list
-        # Newer torchvision AnchorGenerator signature: (images, features) or (feature_maps, image_sizes)
-        # We call the latter form:
-        with torch.no_grad():
-            # Make a fake list of feature maps to read spatial sizes (same as feats)
-            feat_sizes = [f.shape[-2:] for f in feats]
-        # Build anchors per image using image size (H, W)
-        # Torchvision's AnchorGenerator forward(feature_maps) ignores image size and uses feature sizes; but
-        # the newer API may require feature maps only. We'll call the simple way:
-        anchors = self.anchor_gen(feats)  # returns List[List[Boxes]] length=B
-
-        # Stack anchors per image to [B, N, 4] in XYXY
+        # Anchors per image (concatenate levels)
+        anchors_per_img = self.anchor_gen(feats)  # list per image
         anchors_xyxy = []
-        for i in range(B):
-            # anchors[i] is a Boxes (Tensor[N,4]) or list of tensors per level depending on version
-            ai = anchors[i]
+        for ai in anchors_per_img:
             if isinstance(ai, list):
                 ai = torch.cat(ai, dim=0)
             anchors_xyxy.append(ai)
-        anchors_xyxy = torch.stack(anchors_xyxy, dim=0)  # [B, N, 4]
+        anchors_xyxy = torch.stack(anchors_xyxy, dim=0)  # [B,N,4]
 
         return cls_logits, bbox_deltas, anchors_xyxy
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True, help="Path to best.pth from training")
-    ap.add_argument("--out",  required=True, help="Path to write ONNX file")
-    ap.add_argument("--num-classes", type=int, required=True, help="Number of classes used in training")
-    ap.add_argument("--img-size", type=int, default=512, help="Export with H=W=img-size (must be divisible by 32)")
+    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--out",  required=True)
+    ap.add_argument("--num-classes", type=int, required=True)
+    ap.add_argument("--img-size", type=int, default=512)
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument("--device", choices=["cpu", "cuda"], default=("cuda" if torch.cuda.is_available() else "cpu"))
+    ap.add_argument("--dynamo", action="store_true", help="Use the new ONNX dynamo exporter")
     args = ap.parse_args()
 
     device = torch.device(args.device)
 
-    # Rebuild model exactly as training code did (no weights on heads/backbone)
-    # We only need the model architecture; weights come from ckpt.
-    # NOTE: build_model_and_helpers constructs torchvision RetinaNet when model_name='retinanet'.
-    # (From your uploaded train.py: build_model_and_helpers returns the model for 'retinanet'.) :contentReference[oaicite:2]{index=2}
+    # Build like training and load weights
     model, _, _, _ = build_model_and_helpers(
         model_name="retinanet",
         num_classes=args.num_classes,
@@ -147,26 +183,20 @@ def main():
         device=device,
     )
     model.eval()
-
-    # Load your checkpoint weights
     ckpt = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
-    # Wrap with export module
-    export_mod = RetinaNetHeadExport(model, num_classes=args.num_classes).to(device)
-    export_mod.eval()
+    export_mod = RetinaNetHeadExport(model, num_classes=args.num_classes).to(device).eval()
 
-    # Dummy input
     H = W = int(args.img_size)
-    assert H % 32 == 0 and W % 32 == 0, "img-size must be divisible by 32"
+    assert H % 32 == 0 and W % 32 == 0
     dummy = torch.randn(1, 3, H, W, device=device, dtype=torch.float32)
 
-    # Dynamic axes
     dynamic_axes = {
-        "images": {0: "batch", 2: "height", 3: "width"},
-        "cls_logits": {0: "batch", 1: "num_anchors"},
-        "bbox_deltas": {0: "batch", 1: "num_anchors"},
+        "images":       {0: "batch", 2: "height", 3: "width"},
+        "cls_logits":   {0: "batch", 1: "num_anchors"},
+        "bbox_deltas":  {0: "batch", 1: "num_anchors"},
         "anchors_xyxy": {0: "batch", 1: "num_anchors"},
     }
 
@@ -179,12 +209,13 @@ def main():
         opset_version=args.opset,
         do_constant_folding=True,
         dynamic_axes=dynamic_axes,
+        dynamo=args.dynamo,                           # try --dynamo for new exporter
+        training=torch.onnx.TrainingMode.EVAL,
     )
 
     print(f"[OK] Exported ONNX to: {args.out}")
     print("    Inputs : images [B,3,H,W] (float32, ImageNet-normalized)")
     print("    Outputs: cls_logits [B,N,C], bbox_deltas [B,N,4], anchors_xyxy [B,N,4]")
-    print("    Note   : run decoding + NMS in your app (example shown below).")
 
 
 if __name__ == "__main__":

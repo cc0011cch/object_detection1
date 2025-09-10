@@ -748,8 +748,11 @@ def main():
     start_epoch, best_val, best_epoch, _ = 0, float("inf"), None, None
     if args.resume:
         ckpt_path = Path(args.resume)
+        print("ckpt_path: {}".format(ckpt_path))
         if ckpt_path.is_file():
             start_epoch, best_val, best_epoch, _ = load_checkpoint_if_any(model, optimizer, scheduler, ckpt_path, device)
+        else:
+            raise FileNotFoundError(f"--resume file not found: {ckpt_path.resolve()}")
 
     patience = args.early_stop_patience
     epochs_no_improve = 0
