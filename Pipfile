@@ -9,6 +9,7 @@ tensorboard = "*"
 transformers = "*"
 albumentations = "*"
 pycocotools = "*"
+timm = "*"
 
 [dev-packages]
 

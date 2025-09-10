@@ -123,26 +123,64 @@ python train.py \
   --train-images ./data/coco/train2017 \
   --val-images   ./data/coco/train2017 \
   --epochs 10 \
-  --batch-size 2 \
+  --batch-size 8 \
   --head-lr 1e-3 \
   --backbone-lr 1e-4 \
   --freeze-backbone-epochs 3 \
   --freeze-bn-when-frozen \
   --albu \
-  --out runs/retina_freeze3 \
-  --eval-map-every 1
+  --out runs/retina_k3
+  --eval-map-every 1   
+
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+
+python train.py \
+  --model retinanet \
+ --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
+  --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
+   --train-images ./data/coco/train2017 \
+  --val-images   ./data/coco/val2017 \
+  --epochs 5 \
+  --batch-size 2 \
+  --num-workers 4 \
+  --prefetch-factor 4 \
+  --persistent-workers \
+  --accum-steps 2 \
+  --resize-short 640 \
+  --albu \
+  --head-lr 1e-3 \
+  --backbone-lr 1e-4 \
+  --weight-decay 1e-4 \
+  --freeze-backbone-epochs 1 \
+  --freeze-bn-when-frozen \
+  --warmup-steps 100 \
+  --out runs/retinanet_exp1
+
+
 
 # DETR with smaller backbone LR, no freezing
+
+
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+
 python train.py \
   --model detr \
-  --train-ann ./data/instances_train2017_split_train.json \
-  --val-ann   ./data/instances_train2017_split_eval.json \
+ --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
+  --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
   --train-images ./data/coco/train2017 \
   --val-images   ./data/coco/train2017 \
-  --epochs 10 \
+  --epochs 5 \
   --batch-size 2 \
-  --head-lr 1e-4 \
-  --backbone-lr 1e-5 \
+  --num-workers 4 \
+  --prefetch-factor 4 \
+  --persistent-workers \
+  --accum-steps 2 \
+  --resize-short 640 \
   --albu \
-  --out runs/detr_head_backbone_lrs \
-  --eval-map-every 1
+  --head-lr 1e-3 \
+  --backbone-lr 1e-4 \
+  --weight-decay 1e-4 \
+  --freeze-backbone-epochs 1 \
+  --freeze-bn-when-frozen \
+  --warmup-steps 100 \
+  --out runs/detr_exp1  
