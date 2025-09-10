@@ -85,6 +85,11 @@ python tools/make_debug_subset.py \
   --out-json ./data/coco/annotations_used/instances_train2017_debug.json \
   --samples 30
 
+python tools/make_debug_subset.py \
+  --train-json ./data/coco/annotations_used/instances_train2017_split_train.json \
+  --out-json ./data/coco/annotations_used/instances_train2017_debug500.json \
+  --samples 500
+
 # Save 8 augmented training-look samples (Albumentations on)
 python dataset.py \
   --ann-json ./data/coco/annotations_used/instances_train2017_debug.json \
@@ -115,21 +120,31 @@ python train.py \
   --albu \
   --out runs/retinanet_exp1
 
-  # Warm start: freeze backbone for 3 epochs, then unfreeze with small LR
-
-OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
-
+  # Tip: first run once with RFS enabled to build the cache quickly:
 python train.py \
   --model retinanet \
-  --train-ann ./data/coco/annotations_used/instances_train2017_split_train.json \
+  --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json \
   --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
-  --train-images ./data/coco/train2017 --val-images   ./data/coco/train2017 \
-  --epochs 16 --batch-size 8 --accum-steps 1 --num-workers 4 \
-  --prefetch-factor 4 --persistent-workers --resize-short 512 \
-  --albu --albu-strength medium --head-lr 1e-3 --backbone-lr 1e-4 \
-  --weight-decay 1e-4 --freeze-backbone-epochs 1 --freeze-bn-when-frozen \
-  --warmup-steps 1000 --rfs 0.001 --rfsAlpha 0.75 --print-freq 20 --out runs/retina_rfs001
+  --train-images ./data/coco/train2017 --val-images ./data/coco/train2017 \
+  --epochs 1 --batch-size 2 --resize-short 512 --num-workers 4 --rfs 0.001 --rfsAlpha 0.75 \
+  --max-train-batches 10 --max-val-batches 5 --out runs/sanity_rfs_cache
 
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model retinanet --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json --train-images ./data/coco/train2017 --val-images   ./data/coco/train2017 --epochs 16 --batch-size 8 --accum-steps 2 --num-workers 8 --prefetch-factor 4 --persistent-workers --resize-short 512 --albu --albu-strength medium --head-lr 5e-4 --backbone-lr 5e-5 --weight-decay 1e-4 --freeze-backbone-epochs 1 --freeze-bn-when-frozen --warmup-steps 300 --rfs 0.001 --rfsAlpha 0.75 --print-freq 20 --log-file runs/retina/train1.log --log-console --out runs/retina_rfs001
+
+#Setup tensorboard and remote access in local browser
+in ec2:
+tensorboard --logdir=data/model --port=8080
+
+
+In your terminal:
+
+ssh -i /path/to/your/AWS/key/file -NL 8080:localhost:8080 user@host
+where:
+
+user and host: your aws ec2 user and instance specific.
+-N: don't execute a remote command (just forward ports)
+-L: [bind_address:]port:host:hostport
+After that, browse to http://localhost:8080/
   
 
 #debug
