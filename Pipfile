@@ -12,6 +12,7 @@ pycocotools = "*"
 timm = "*"
 onnxruntime = "*"
 onnxscript = "*"
+onnxruntime-gpu = "*"
 
 [dev-packages]
 
