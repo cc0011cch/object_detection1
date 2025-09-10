@@ -78,7 +78,6 @@ class CocoDetDataset(Dataset):
         self,
         images_dir: str,
         ann_json: str,
-        model_family: str = "retinanet",   # kept only for logging; labels are always 0..K-1
         augment: bool = False,
         use_albu: bool = False,
         albu_strength: str = "light",
@@ -87,7 +86,6 @@ class CocoDetDataset(Dataset):
         super().__init__()
         self.images_dir = images_dir
         self.ann_json = ann_json
-        self.model_family = model_family.lower()
 
         data = _load_json(ann_json)
 
@@ -340,7 +338,6 @@ if __name__ == "__main__":
     ds = CocoDetDataset(
         images_dir=args.images,
         ann_json=args.ann,
-        model_family=args.model_family,
         augment=args.augment,
         use_albu=args.use_albu,
         albu_strength=args.albu_strength,

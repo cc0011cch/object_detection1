@@ -185,7 +185,6 @@ def main():
     ds = CocoDetDataset(
         images_dir=args.test_images,
         ann_json=args.test_ann,
-        model_family=(args.model if args.backend == "torch" else "retinanet"),
         augment=False, use_albu=False,
     )
     if hasattr(ds, "set_target_size"):

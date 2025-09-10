@@ -577,7 +577,6 @@ def main():
     ds_train = CocoDetDataset(
         images_dir=args.train_images,
         ann_json=args.train_ann,
-        model_family=args.model,
         augment=True,
         use_albu=args.albu,
         albu_strength=args.albu_strength,
@@ -585,7 +584,6 @@ def main():
     ds_val = CocoDetDataset(
         images_dir=args.val_images,
         ann_json=args.val_ann,
-        model_family=args.model,
         augment=False,
         use_albu=False,
     )
