@@ -116,36 +116,36 @@ python train.py \
   --out runs/retinanet_exp1
 
   # Warm start: freeze backbone for 3 epochs, then unfreeze with small LR
-python train.py \
-  --model retinanet \
-  --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
-  --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
-  --train-images ./data/coco/train2017 \
-  --val-images   ./data/coco/train2017 \
-  --epochs 10 \
-  --batch-size 8 \
-  --head-lr 1e-3 \
-  --backbone-lr 1e-4 \
-  --freeze-backbone-epochs 3 \
-  --freeze-bn-when-frozen \
-  --albu \
-  --out runs/retina_k3
-  --eval-map-every 1   
 
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 
 python train.py \
   --model retinanet \
+  --train-ann ./data/coco/annotations_used/instances_train2017_split_train.json \
+  --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
+  --train-images ./data/coco/train2017 --val-images   ./data/coco/train2017 \
+  --epochs 16 --batch-size 8 --accum-steps 1 --num-workers 4 \
+  --prefetch-factor 4 --persistent-workers --resize-short 512 \
+  --albu --albu-strength medium --head-lr 1e-3 --backbone-lr 1e-4 \
+  --weight-decay 1e-4 --freeze-backbone-epochs 1 --freeze-bn-when-frozen \
+  --warmup-steps 1000 --rfs 0.001 --rfsAlpha 0.75 --print-freq 20 --out runs/retina_rfs001
+
+  
+
+#debug
+python train.py \
+  --model retinanet \
  --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
   --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
    --train-images ./data/coco/train2017 \
-  --val-images   ./data/coco/val2017 \
-  --epochs 5 \
+  --val-images   ./data/coco/train2017 \
+  --epochs 20 \
   --batch-size 2 \
   --num-workers 4 \
   --prefetch-factor 4 \
   --persistent-workers \
-  --accum-steps 2 \
+  --accum-steps 8 \
+  --rfs 0.001
   --resize-short 640 \
   --albu \
   --head-lr 1e-3 \
@@ -156,31 +156,28 @@ python train.py \
   --warmup-steps 100 \
   --out runs/retinanet_exp1
 
-
-
 # DETR with smaller backbone LR, no freezing
 
+  OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 
-OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
-
-python train.py \
+  python train.py \
   --model detr \
- --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
+  --train-ann ./data/coco/annotations_used/instances_train2017_debug.json \
   --val-ann   ./data/coco/annotations_used/instances_train2017_split_eval.json \
   --train-images ./data/coco/train2017 \
   --val-images   ./data/coco/train2017 \
-  --epochs 5 \
-  --batch-size 2 \
+  --epochs 60 \
+  --batch-size 4 \
   --num-workers 4 \
   --prefetch-factor 4 \
   --persistent-workers \
-  --accum-steps 2 \
+  --accum-steps 8 \
   --resize-short 640 \
   --albu \
   --head-lr 1e-3 \
   --backbone-lr 1e-4 \
   --weight-decay 1e-4 \
-  --freeze-backbone-epochs 1 \
+  --freeze-backbone-epochs 0 \
   --freeze-bn-when-frozen \
-  --warmup-steps 100 \
-  --out runs/detr_exp1  
+  --warmup-steps 500 \
+  --out runs/detr_exp1
