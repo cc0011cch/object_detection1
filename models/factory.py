@@ -1,0 +1,191 @@
+from typing import Any, Dict, List, Tuple
+import torch
+
+try:
+    from transformers import DetrForObjectDetection, DetrImageProcessor
+    HF_AVAILABLE = True
+except Exception:
+    HF_AVAILABLE = False
+
+
+def split_param_groups_backbone(model, head_lr, backbone_lr, weight_decay):
+    bb_decay, bb_nodecay, hd_decay, hd_nodecay = [], [], [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        is_backbone = ("backbone" in n)
+        no_decay = (p.ndim <= 1) or n.endswith(".bias")
+        if is_backbone:
+            (bb_nodecay if no_decay else bb_decay).append(p)
+        else:
+            (hd_nodecay if no_decay else hd_decay).append(p)
+    groups = []
+    if bb_decay:
+        groups.append({"params": bb_decay, "lr": backbone_lr, "weight_decay": weight_decay, "name": "backbone_decay"})
+    if bb_nodecay:
+        groups.append({"params": bb_nodecay, "lr": backbone_lr, "weight_decay": 0.0, "name": "backbone_nodecay"})
+    if hd_decay:
+        groups.append({"params": hd_decay, "lr": head_lr, "weight_decay": weight_decay, "name": "head_decay"})
+    if hd_nodecay:
+        groups.append({"params": hd_nodecay, "lr": head_lr, "weight_decay": 0.0, "name": "head_nodecay"})
+    idx_bb = [i for i, g in enumerate(groups) if g["name"].startswith("backbone")]
+    return groups, idx_bb
+
+
+def detr_param_groups(model, head_lr, backbone_lr, weight_decay):
+    no_decay_keywords = ("bias", "LayerNorm.weight", "layer_norm", "norm.weight")
+    pos_embed_keywords = ("position_embeddings", "row_embed", "col_embed", "query_position_embeddings")
+
+    def needs_no_decay(n):
+        return any(k in n for k in no_decay_keywords) or any(k in n for k in pos_embed_keywords)
+
+    groups = {"bb_decay": [], "bb_nodecay": [], "hd_decay": [], "hd_nodecay": []}
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        is_backbone = ("backbone" in n)
+        nodecay = needs_no_decay(n)
+        if is_backbone:
+            (groups["bb_nodecay"] if nodecay else groups["bb_decay"]).append(p)
+        else:
+            (groups["hd_nodecay"] if nodecay else groups["hd_decay"]).append(p)
+
+    param_groups, idx_bb = [], []
+    if groups["bb_decay"]:
+        idx_bb.append(len(param_groups))
+        param_groups.append({"params": groups["bb_decay"], "lr": backbone_lr, "weight_decay": weight_decay, "name": "backbone_decay"})
+    if groups["bb_nodecay"]:
+        idx_bb.append(len(param_groups))
+        param_groups.append({"params": groups["bb_nodecay"], "lr": backbone_lr, "weight_decay": 0.0, "name": "backbone_nodecay"})
+    if groups["hd_decay"]:
+        param_groups.append({"params": groups["hd_decay"], "lr": head_lr, "weight_decay": weight_decay, "name": "head_decay"})
+    if groups["hd_nodecay"]:
+        param_groups.append({"params": groups["hd_nodecay"], "lr": head_lr, "weight_decay": 0.0, "name": "head_nodecay"})
+    return param_groups, idx_bb
+
+
+def find_backbone_module(model):
+    if hasattr(model, "backbone"):
+        return model.backbone
+    if hasattr(model, "model") and hasattr(model.model, "backbone"):
+        return model.model.backbone
+    return None
+
+
+def build_model_and_helpers(
+    model_name: str,
+    num_classes: int,
+    id2label_0based: Dict[int, str],
+    label2id_0based: Dict[str, int],
+    cat_ids_sorted: List[int],
+    device: torch.device,
+) -> Tuple[Any, Any, Any, Any]:
+    model_name = model_name.lower()
+
+    if model_name == "retinanet":
+        from torchvision.models.detection import retinanet_resnet50_fpn_v2
+        from torchvision.models import ResNet50_Weights
+
+        model = retinanet_resnet50_fpn_v2(
+            weights=None,
+            weights_backbone=ResNet50_Weights.IMAGENET1K_V2,
+            num_classes=num_classes,
+        ).to(device)
+
+        def _train_forward(images, targets):
+            model.train()
+            losses: Dict[str, torch.Tensor] = model(images, targets)
+            loss = sum(losses.values())
+            return losses, loss
+
+        @torch.no_grad()
+        def _val_forward(images, targets):
+            model.train()
+            losses: Dict[str, torch.Tensor] = model(images, targets)
+            return sum(losses.values())
+
+        @torch.no_grad()
+        def _predict_batch(images: List[torch.Tensor], img_ids: List[int]):
+            model.eval()
+            preds = model([img.to(device) for img in images])
+            results = []
+            for img_id, p in zip(img_ids, preds):
+                boxes = p["boxes"].detach().cpu().numpy()
+                scores = p["scores"].detach().cpu().numpy()
+                labels = p["labels"].detach().cpu().numpy()
+                for (x1, y1, x2, y2), s, l in zip(boxes, scores, labels):
+                    cat_id = cat_ids_sorted[int(l)]
+                    results.append({
+                        "image_id": int(img_id),
+                        "category_id": int(cat_id),
+                        "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
+                        "score": float(s),
+                    })
+            return results
+
+        return model, _train_forward, _val_forward, _predict_batch
+
+    elif model_name == "detr":
+        assert HF_AVAILABLE, "Install transformers to use DETR."
+        model = DetrForObjectDetection.from_pretrained(
+            "facebook/detr-resnet-50",
+            num_labels=num_classes,
+            ignore_mismatched_sizes=True,
+            id2label=id2label_0based,
+            label2id=label2id_0based,
+        ).to(device)
+
+        processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+
+        def _encode_batch(images: List[torch.Tensor], targets: List[Dict[str, torch.Tensor]]):
+            np_imgs = [(img.permute(1, 2, 0).clamp(0, 1).mul(255).byte().cpu().numpy()) for img in images]
+
+            annotations = []
+            for t in targets:
+                boxes_xyxy = t["boxes"].cpu().numpy()
+                labels_0based = t["labels"].cpu().numpy().tolist()
+
+                coco_objs = []
+                for (x1, y1, x2, y2), lbl in zip(boxes_xyxy, labels_0based):
+                    w = float(x2 - x1); h = float(y2 - y1)
+                    coco_objs.append({
+                        "bbox": [float(x1), float(y1), w, h],
+                        "category_id": int(lbl),
+                        "area": float(w * h),
+                        "iscrowd": 0,
+                    })
+
+                annotations.append({
+                    "image_id": int(t["image_id"].item()),
+                    "annotations": coco_objs,
+                })
+
+            enc = processor(images=np_imgs, annotations=annotations, return_tensors="pt")
+            enc["pixel_values"] = enc["pixel_values"].to(model.device)
+            if "pixel_mask" in enc:
+                enc["pixel_mask"] = enc["pixel_mask"].to(model.device)
+            if "labels" in enc:
+                enc["labels"] = [
+                    {k: (v.to(model.device) if torch.is_tensor(v) else v) for k, v in lab.items()}
+                    for lab in enc["labels"]
+                ]
+            return enc
+
+        def _train_forward(images, targets):
+            model.train()
+            inputs = _encode_batch(images, targets)
+            outputs = model(**inputs)
+            loss = outputs.loss
+            return {"loss": loss}, loss
+
+        @torch.no_grad()
+        def _val_forward(images, targets):
+            model.train()
+            inputs = _encode_batch(images, targets)
+            outputs = model(**inputs)
+            return outputs.loss
+
+        return model, _train_forward, _val_forward, None
+
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
