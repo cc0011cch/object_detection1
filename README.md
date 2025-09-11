@@ -156,6 +156,9 @@ python train.py \
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 python train.py --model retinanet --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json --val-ann   ./data/coco/annotations_used/instances_train2017_valdebug50.json --train-images ./data/coco/train2017 --val-images   ./data/coco/train2017 --epochs 16 --batch-size 6 --accum-steps 4 --num-workers 2 --prefetch-factor 2 --resize-short 800 --albu --albu-strength medium --head-lr 5e-4 --backbone-lr 5e-5 --weight-decay 1e-4 --freeze-backbone-epochs 1 --freeze-bn-when-frozen --warmup-steps 300 --rfs 0.001 --rfsAlpha 0.75 --eval-map-every 1 --eval-map-max-batches 50 --early-metric macro_map --print-freq 20 --eval-map-every 3 --eval-map-max-batches 50 --early-metric macro_map --log-file runs/retina/train2.log --log-console --out runs/retina_rfs002
 
+### (b1) RetinaNet (full run tuned)
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model retinanet --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json --val-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --train-images ./data/coco/train2017 --val-images ./data/coco/train2017 --epochs 24 --batch-size 4 --accum-steps 2 --num-workers 2 --prefetch-factor 2 --resize-short 800 --albu --albu-strength light --head-lr 1e-3 --backbone-lr 1e-4 --weight-decay 5e-5 --freeze-backbone-epochs 1 --freeze-bn-when-frozen --warmup-steps 100 --rfs 0.0 --eval-map-every 2 --eval-map-max-batches 100 --early-metric coco_ap --grad-clip 2.0 --print-freq 20 --amp bf16 --empty-cache-every 50 --log-file runs/retina/train_tuned.log --log-console --out runs/retina_rfs002_tuned
+
 ### (b2) RetinaNet (resume)
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 python train.py \

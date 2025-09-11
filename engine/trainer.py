@@ -55,17 +55,31 @@ class Trainer:
         if args.max_train_batches is not None:
             steps_per_epoch = min(steps_per_epoch, args.max_train_batches)
         steps_per_epoch = max(1, steps_per_epoch)
+        self.steps_per_epoch = steps_per_epoch
         self.total_steps = steps_per_epoch * args.epochs
         self.scheduler = make_scheduler(self.optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=self.total_steps)
 
-        self.use_amp = (device.type == "cuda")
+        # AMP configuration
+        self.use_amp = (device.type == "cuda") and (args.amp != "off")
         bf16_supported = bool(self.use_amp and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported())
-        self.amp_dtype = torch.bfloat16 if bf16_supported else torch.float16
+        if args.amp == "fp16":
+            self.amp_dtype = torch.float16
+        elif args.amp == "bf16":
+            self.amp_dtype = torch.bfloat16
+        elif args.amp == "auto":
+            self.amp_dtype = torch.bfloat16 if bf16_supported else torch.float16
+        else:
+            self.amp_dtype = None
 
-        try:
-            self.scaler = torch.amp.GradScaler(device_type="cuda", enabled=self.use_amp and (self.amp_dtype is torch.float16))
-        except Exception:
-            self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp and (self.amp_dtype is torch.float16))
+        # Grad scaler (only meaningful for fp16)
+        if self.use_amp and self.amp_dtype is torch.float16:
+            try:
+                from torch.amp import GradScaler
+                self.scaler = GradScaler("cuda", enabled=True)
+            except Exception:
+                self.scaler = torch.cuda.amp.GradScaler(enabled=True)
+        else:
+            self.scaler = None
 
         self.out_dir = Path(args.out); self.out_dir.mkdir(parents=True, exist_ok=True)
         self.writer = SummaryWriter(log_dir=str(self.out_dir))
@@ -131,6 +145,9 @@ class Trainer:
             # Train one epoch
             model.train()
             running = 0.0
+            clip_updates = 0
+            clip_clipped = 0
+            grad_norms: list = []
             for bidx, (images, targets) in enumerate(self.dl_train):
                 if args.max_train_batches is not None and bidx >= args.max_train_batches:
                     break
@@ -138,8 +155,13 @@ class Trainer:
                 images = [img.to(device) for img in images]
                 targets = [{k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()} for t in targets]
 
-                if self.use_amp and (self.amp_dtype is torch.float16):
-                    with torch.cuda.amp.autocast(enabled=True):
+                if self.use_amp and self.amp_dtype is not None:
+                    try:
+                        from torch.amp import autocast
+                        autocast_ctx = autocast("cuda", dtype=self.amp_dtype)
+                    except Exception:
+                        autocast_ctx = torch.cuda.amp.autocast(enabled=True)
+                    with autocast_ctx:
                         loss_dict, loss = self.train_forward(images, targets)
                 else:
                     loss_dict, loss = self.train_forward(images, targets)
@@ -151,10 +173,29 @@ class Trainer:
                     loss.backward()
 
                 if (bidx + 1) % accum == 0:
+                    # If using scaler, make sure grads are unscaled before measuring norms / clipping
+                    if self.scaler is not None and self.use_amp and (self.amp_dtype is torch.float16):
+                        self.scaler.unscale_(self.optimizer)
+
+                    # Measure gradient norm (unclipped) for logging
+                    try:
+                        total_norm_unclipped = float(clip_grad_norm_(model.parameters(), max_norm=float('inf')).item())
+                    except Exception:
+                        # Older PyTorch clip_grad_norm_ returns a Tensor or float; handle both
+                        tn = clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+                        total_norm_unclipped = float(tn.detach().cpu().item()) if hasattr(tn, 'detach') else float(tn)
+                    grad_norms.append(total_norm_unclipped)
+
+                    # Optional clipping
                     if args.grad_clip is not None and args.grad_clip > 0:
-                        if self.scaler is not None and self.use_amp and (self.amp_dtype is torch.float16):
-                            self.scaler.unscale_(self.optimizer)
-                        clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+                        tn = clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+                        clip_updates += 1
+                        try:
+                            clipped_now = float(total_norm_unclipped) > float(args.grad_clip)
+                        except Exception:
+                            clipped_now = False
+                        if clipped_now:
+                            clip_clipped += 1
 
                     if self.scaler is not None and self.use_amp and (self.amp_dtype is torch.float16):
                         self.scaler.step(self.optimizer)
@@ -168,9 +209,69 @@ class Trainer:
                 self.global_step += 1
 
                 if (bidx + 1) % args.print_freq == 0:
-                    self.logger.info(f"[train] epoch {epoch+1} step {bidx+1} loss={running/args.print_freq:.4f}")
-                    self.writer.add_scalar("train/loss", running / args.print_freq, self.global_step)
+                    # Try to format like legacy logs when keys are available
+                    cls_val = None
+                    reg_val = None
+                    if isinstance(loss_dict, dict):
+                        # Extract raw (pre-accum) values if present
+                        if "classification" in loss_dict and hasattr(loss_dict["classification"], "detach"):
+                            cls_val = float(loss_dict["classification"].detach().cpu().item())
+                        if "bbox_regression" in loss_dict and hasattr(loss_dict["bbox_regression"], "detach"):
+                            reg_val = float(loss_dict["bbox_regression"].detach().cpu().item())
+                    if cls_val is not None and reg_val is not None:
+                        total_val = cls_val + reg_val
+                        self.logger.info(
+                            f"Epoch: {epoch+1}/{args.epochs}, Batches: {bidx+1}/{self.steps_per_epoch}, "
+                            f"classification:{cls_val:.4f} bbox_regression:{reg_val:.4f} total:{total_val:.4f}"
+                        )
+                        # Also log scalars
+                        self.writer.add_scalar("train/classification", cls_val, self.global_step)
+                        self.writer.add_scalar("train/bbox_regression", reg_val, self.global_step)
+                        self.writer.add_scalar("train/total", total_val, self.global_step)
+                    else:
+                        avg_loss = running / args.print_freq
+                        self.logger.info(
+                            f"[train] epoch {epoch+1} step {bidx+1} loss={avg_loss:.4f}"
+                        )
+                        self.writer.add_scalar("train/loss", avg_loss, self.global_step)
                     running = 0.0
+
+                # Optionally smooth nvidia-smi memory readouts (no effect on real usage)
+                if args.empty_cache_every and ((bidx + 1) % args.empty_cache_every == 0):
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+
+            # Clip summary (match older log style)
+            if clip_updates > 0:
+                pct = 100.0 * (clip_clipped / max(1, clip_updates))
+                self.logger.info(f"[clip] {clip_clipped}/{clip_updates} steps clipped ({pct:.1f}%)")
+                # TensorBoard: clipping rate per epoch
+                try:
+                    self.writer.add_scalar("train/clip_rate", clip_clipped / max(1, clip_updates), epoch)
+                except Exception:
+                    pass
+
+            # Gradient norm stats
+            if grad_norms:
+                n = len(grad_norms)
+                s = sorted(grad_norms)
+                mean = sum(grad_norms) / n
+                median = s[n//2]
+                p95 = s[min(n-1, int(0.95*(n-1)))]
+                mx = s[-1]
+                self.logger.info(
+                    f"[gradnorm] updates={n} mean={mean:.3f} median={median:.3f} p95={p95:.3f} max={mx:.3f}"
+                )
+                # TensorBoard: gradient norm stats
+                try:
+                    self.writer.add_scalar("train/grad_norm_mean", mean, epoch)
+                    self.writer.add_scalar("train/grad_norm_median", median, epoch)
+                    self.writer.add_scalar("train/grad_norm_p95", p95, epoch)
+                    self.writer.add_scalar("train/grad_norm_max", mx, epoch)
+                except Exception:
+                    pass
 
             # Validation loss
             val_loss = self._val_loss(max_batches=args.max_val_batches)
@@ -302,4 +403,3 @@ class Trainer:
         self.logger.info(
             f"[done] Best model: epoch {self.best_epoch} with val_loss={self.best_val:.4f}. Checkpoints at {self.args.out}"
         )
-

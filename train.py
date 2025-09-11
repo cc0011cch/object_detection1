@@ -64,6 +64,10 @@ def main():
     ap.add_argument("--persistent-workers", action="store_true", help="Keep worker processes alive")
     ap.add_argument("--accum-steps", type=int, default=1, help="Gradient accumulation steps")
     ap.add_argument("--resize-short", type=int, default=640, help="Resize short side if dataset supports")
+    ap.add_argument("--amp", choices=["auto", "fp16", "bf16", "off"], default="auto",
+                    help="Mixed precision mode: auto (prefer bf16 on supported GPUs), fp16, bf16, or off")
+    ap.add_argument("--empty-cache-every", type=int, default=0,
+                    help="If >0, call torch.cuda.empty_cache() every N steps to smooth nvidia-smi memory")
 
     # Logging/checkpointing/eval
     ap.add_argument("--warmup-steps", type=int, default=100)
