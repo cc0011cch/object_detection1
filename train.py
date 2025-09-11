@@ -322,12 +322,15 @@ from pycocotools.cocoeval import COCOeval
 def coco_map_with_macro(model_name, model, dl_val, ds_val, device, predict_batch_fn, val_ann_path,
                         max_batches=None):
     """
-    Returns: dict with AP, AP50, AP75, macro_mAP, macro_AP50, per-class dicts.
+    Returns: dict with AP, AP50, AP75, macro_mAP, macro_AP50, and per-class dicts.
     """
+    if not COCO_EVAL_AVAILABLE:
+        LOG("[warn] pycocotools not available; skipping mAP.")
+        return None
+
     detections = []
     cat_ids_sorted = sorted([c["id"] for c in ds_val.categories])
 
-    # (For DETR: use processor postprocess like your final eval block.)
     proc = None
     if model_name == "detr":
         from transformers import DetrImageProcessor
@@ -349,7 +352,8 @@ def coco_map_with_macro(model_name, model, dl_val, ds_val, device, predict_batch
                 enc["pixel_mask"] = enc["pixel_mask"].to(device)
             outputs = model(**enc)
             sizes = [(ds_val.imgid_to_img[i]["height"], ds_val.imgid_to_img[i]["width"]) for i in img_ids]
-            processed = proc.post_process_object_detection(outputs, target_sizes=torch.tensor(sizes, device=device))
+            sizes = torch.tensor(sizes, device=device)
+            processed = proc.post_process_object_detection(outputs, target_sizes=sizes)
             batch_dets = []
             for img_id, p in zip(img_ids, processed):
                 boxes = p["boxes"].detach().cpu().numpy()
@@ -368,21 +372,48 @@ def coco_map_with_macro(model_name, model, dl_val, ds_val, device, predict_batch
 
     coco_gt = COCO(val_ann_path)
     if len(detections) == 0:
+        LOG("[warn] No detections produced; skipping mAP this epoch.")
         return None
 
     coco_dt = coco_gt.loadRes(detections)
     coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
-    coco_eval.evaluate(); coco_eval.accumulate()
+    coco_eval.evaluate()
+    coco_eval.accumulate()
 
-    # Overall COCO stats
-    ap, ap50, ap75, aps, apm, apl, ar1, ar10, ar100, ars, arm, arl = map(float, coco_eval.stats)
+    # IMPORTANT: summarize() populates coco_eval.stats
+    try:
+        from contextlib import redirect_stdout
+        import io as _io
+        buf = _io.StringIO()
+        with redirect_stdout(buf):
+            coco_eval.summarize()
+        # (optional) LOG the table:
+        LOG("\n[COCOeval summary]\n" + buf.getvalue().strip())
+    except Exception:
+        # If summarize() fails, continue; we can still compute macro metrics below.
+        pass
 
-    # Per-class PR tensor: [T, R, K, A, M]
-    precisions = coco_eval.eval["precision"]
-    a = 0
-    m = 2 if precisions.shape[-1] >= 3 else precisions.shape[-1] - 1
+    # Safely read stats (may be None/short if GT/preds don’t overlap)
+    ap = ap50 = ap75 = aps = apm = apl = float("nan")
+    if getattr(coco_eval, "stats", None) is not None and len(coco_eval.stats) >= 6:
+        ap, ap50, ap75, aps, apm, apl = [float(c) for c in coco_eval.stats[:6]]
+
+    # Per-class precision tensor: [T, R, K, A, M]
+    precisions = coco_eval.eval.get("precision", None)
+    if precisions is None or precisions.size == 0:
+        LOG("[warn] COCO precision tensor is empty; returning NaNs for Macro metrics.")
+        return {
+            "AP": ap, "AP50": ap50, "AP75": ap75,
+            "APS": aps, "APM": apm, "APL": apl,
+            "macro_mAP": float("nan"), "macro_AP50": float("nan"),
+            "per_class_ap": {}, "per_class_ap50": {},
+        }
+
+    a = 0  # area=all
+    m = 2 if precisions.shape[-1] >= 3 else precisions.shape[-1] - 1  # maxDets=100 or last
     iou_thrs = coco_eval.params.iouThrs
-    t50 = int(np.argmin(np.abs(iou_thrs - 0.50)))
+    import numpy as _np
+    t50 = int(_np.argmin(_np.abs(iou_thrs - 0.50)))
 
     id_to_name = {c["id"]: c["name"] for c in coco_gt.loadCats(coco_gt.getCatIds())}
     per_class_ap, per_class_ap50 = {}, {}
@@ -390,14 +421,14 @@ def coco_map_with_macro(model_name, model, dl_val, ds_val, device, predict_batch
     for k_idx, cat_id in enumerate(coco_eval.params.catIds):
         pr = precisions[:, :, k_idx, a, m]
         pr = pr[pr > -1]
-        per_class_ap[cat_id] = float(np.mean(pr)) if pr.size > 0 else float("nan")
+        per_class_ap[cat_id] = float(_np.mean(pr)) if pr.size > 0 else float("nan")
 
         pr50 = precisions[t50, :, k_idx, a, m]
         pr50 = pr50[pr50 > -1]
-        per_class_ap50[cat_id] = float(np.mean(pr50)) if pr50.size > 0 else float("nan")
+        per_class_ap50[cat_id] = float(_np.mean(pr50)) if pr50.size > 0 else float("nan")
 
-    macro_map  = float(np.nanmean(list(per_class_ap.values()))) if per_class_ap else float("nan")
-    macro_ap50 = float(np.nanmean(list(per_class_ap50.values()))) if per_class_ap50 else float("nan")
+    macro_map  = float(_np.nanmean(list(per_class_ap.values()))) if per_class_ap else float("nan")
+    macro_ap50 = float(_np.nanmean(list(per_class_ap50.values()))) if per_class_ap50 else float("nan")
 
     return {
         "AP": ap, "AP50": ap50, "AP75": ap75,
@@ -406,6 +437,7 @@ def coco_map_with_macro(model_name, model, dl_val, ds_val, device, predict_batch
         "per_class_ap":   {id_to_name[c]: per_class_ap[c]   for c in per_class_ap},
         "per_class_ap50": {id_to_name[c]: per_class_ap50[c] for c in per_class_ap50},
     }
+
 
 
 # -------------------- Models & helpers -------------------- #
