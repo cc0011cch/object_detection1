@@ -40,6 +40,7 @@ def coco_map_with_macro(model_name: str,
         img_ids = [int(t["image_id"].item()) for t in targets]
 
         if model_name == "retinanet":
+            # Use predict_batch_fn that already returns bboxes in original image coordinates
             batch_dets = predict_batch_fn(images, img_ids)
         else:
             model.eval()
@@ -130,4 +131,3 @@ def coco_map_with_macro(model_name: str,
         "per_class_ap":   {id_to_name[c]: per_class_ap[c]   for c in per_class_ap},
         "per_class_ap50": {id_to_name[c]: per_class_ap50[c] for c in per_class_ap50},
     }
-

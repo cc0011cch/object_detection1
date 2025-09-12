@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 import torch
 
 try:
@@ -79,6 +79,7 @@ def build_model_and_helpers(
     label2id_0based: Dict[str, int],
     cat_ids_sorted: List[int],
     device: torch.device,
+    orig_size_map: Optional[Dict[int, Tuple[int, int]]] = None,
 ) -> Tuple[Any, Any, Any, Any]:
     model_name = model_name.lower()
 
@@ -109,17 +110,39 @@ def build_model_and_helpers(
             model.eval()
             preds = model([img.to(device) for img in images])
             results = []
+            # Build input tensor sizes map: image_id -> (H,W)
+            sizes_in = {int(iid): tuple(images[idx].shape[-2:]) for idx, iid in enumerate(img_ids)}
             for img_id, p in zip(img_ids, preds):
                 boxes = p["boxes"].detach().cpu().numpy()
                 scores = p["scores"].detach().cpu().numpy()
                 labels = p["labels"].detach().cpu().numpy()
-                for (x1, y1, x2, y2), s, l in zip(boxes, scores, labels):
+
+                # Optional: rescale back to original image size
+                ih, iw = sizes_in.get(int(img_id), (None, None))
+                oh, ow = None, None
+                if orig_size_map is not None:
+                    ohow = orig_size_map.get(int(img_id))
+                    if ohow is not None:
+                        oh, ow = int(ohow[0]), int(ohow[1])
+
+                if ih is not None and oh is not None and ow is not None and oh > 0 and ow > 0:
+                    s = min(ih / oh, iw / ow)
+                    new_h = int(round(oh * s)); new_w = int(round(ow * s))
+                    # Clip to resized region then divide by scale
+                    if boxes.size > 0:
+                        boxes[:, 0] = boxes[:, 0].clip(0, new_w - 1)
+                        boxes[:, 1] = boxes[:, 1].clip(0, new_h - 1)
+                        boxes[:, 2] = boxes[:, 2].clip(0, new_w - 1)
+                        boxes[:, 3] = boxes[:, 3].clip(0, new_h - 1)
+                        boxes = boxes / max(1e-6, s)
+
+                for (x1, y1, x2, y2), s_, l in zip(boxes, scores, labels):
                     cat_id = cat_ids_sorted[int(l)]
                     results.append({
                         "image_id": int(img_id),
                         "category_id": int(cat_id),
-                        "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
-                        "score": float(s),
+                        "bbox": [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))],
+                        "score": float(s_),
                     })
             return results
 

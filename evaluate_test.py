@@ -202,11 +202,15 @@ def main():
 
     # Backend switch
     if args.backend == "torch":
+        # Prepare original size map for proper box scaling
+        orig_size_map = {int(im["id"]): (int(im["height"]), int(im["width"])) for im in ds.images}
+
         model, _, _, predict_batch_fn = build_model_and_helpers(
             model_name=args.model, num_classes=ds.num_classes,
             id2label_0based=getattr(ds, "id2label_0based", {}),
             label2id_0based=getattr(ds, "label2id_0based", {}),
             cat_ids_sorted=cat_ids_sorted, device=device,
+            orig_size_map=orig_size_map,
         )
         ckpt = torch.load(args.ckpt, map_location=device)
         model.load_state_dict(ckpt["model"]); model.eval()
@@ -223,7 +227,25 @@ def main():
         for images, targets in dl:
             img_ids = [int(t["image_id"].item()) for t in targets]
             dets = onnx_model.predict(images, img_ids)
-            detections.extend(dets)
+            # Scale boxes back to original size
+            sizes_in = {int(iid): tuple(images[idx].shape[-2:]) for idx, iid in enumerate(img_ids)}
+            scaled = []
+            for det in dets:
+                iid = int(det["image_id"])
+                oh = int(ds.imgid_to_img[iid]["height"]) ; ow = int(ds.imgid_to_img[iid]["width"]) 
+                ih, iw = sizes_in.get(iid, (oh, ow))
+                s = min(ih / max(1, oh), iw / max(1, ow))
+                new_h = int(round(oh * s)); new_w = int(round(ow * s))
+                x, y, w, h = det["bbox"]
+                x1, y1, x2, y2 = x, y, x + w, y + h
+                x1 = max(0.0, min(x1, new_w - 1)); y1 = max(0.0, min(y1, new_h - 1))
+                x2 = max(0.0, min(x2, new_w - 1)); y2 = max(0.0, min(y2, new_h - 1))
+                if s > 0:
+                    x1 /= s; y1 /= s; x2 /= s; y2 /= s
+                det = dict(det)
+                det["bbox"] = [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
+                scaled.append(det)
+            detections.extend(scaled)
 
     coco_gt = COCO(args.test_ann)
     results = summarize_and_per_class_ap(coco_gt, detections)

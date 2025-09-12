@@ -193,6 +193,9 @@ def main():
     )
 
     # Model & helpers
+    # Build a map image_id -> (height, width) for original sizes
+    orig_size_map = {int(im["id"]): (int(im["height"]), int(im["width"])) for im in ds_val.images}
+
     model, train_forward, val_forward, predict_batch = build_model_and_helpers(
         model_name=args.model,
         num_classes=ds_train.num_classes,
@@ -200,6 +203,7 @@ def main():
         label2id_0based=getattr(ds_train, "label2id_0based", {}),
         cat_ids_sorted=cat_ids_sorted,
         device=device,
+        orig_size_map=orig_size_map,
     )
 
     # Param groups and trainer
