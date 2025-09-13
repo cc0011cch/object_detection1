@@ -178,26 +178,7 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model retinanet --train-an
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model retinanet --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json --val-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --train-images ./data/coco/train2017 --val-images ./data/coco/train2017 --epochs 32 --batch-size 6 --accum-steps 1 --num-workers 2 --prefetch-factor 2 --resize-short 800 --albu --albu-strength light --head-lr 8e-4 --backbone-lr 1e-4 --weight-decay 5e-5 --freeze-backbone-epochs 1 --freeze-bn-when-frozen --warmup-steps 80 --rfs 0.60 --rfsAlpha 0.75 --max-train-batches 300 --eval-map-every 1 --eval-map-max-batches 150 --early-metric macro_map --early-stop-patience 8 --grad-clip 10.0 --amp bf16 --empty-cache-every 50 --print-freq 20 --log-file runs/retina/train_tuned_rfs.log --log-console --out runs/retina_rfs_balanced
 
 ### (b2) RetinaNet (resume)
-OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
-python train.py \
-  --model retinanet \
-  --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json \
-  --val-ann   ./data/coco/annotations_used/instances_train2017_valdebug50.json \
-  --train-images ./data/coco/train2017 \
-  --val-images   ./data/coco/train2017 \
-  --epochs 16 --batch-size 8 --accum-steps 2 \
-  --num-workers 4 --prefetch-factor 2 --persistent-workers \
-  --resize-short 512 \
-  --albu --albu-strength medium \
-  --head-lr 5e-4 --backbone-lr 5e-5 --weight-decay 1e-4 \
-  --freeze-backbone-epochs 1 --freeze-bn-when-frozen \
-  --warmup-steps 300 \
-  --rfs 0.001 --rfsAlpha 0.75 \
-  --resume ./runs/retina_rfs001/last.pth
-  --print-freq 20 \
-  --log-file runs/retina/train1.log \
-  --log-console \
-  --out runs/retina_rfs001  
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model retinanet --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json --val-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --train-images ./data/coco/train2017 --val-images ./data/coco/train2017 --epochs 32 --batch-size 6 --accum-steps 1 --num-workers 2 --prefetch-factor 2 --resize-short 800 --albu --albu-strength light --head-lr 8e-4 --backbone-lr 1e-4 --weight-decay 5e-5 --freeze-backbone-epochs 1 --freeze-bn-when-frozen --warmup-steps 80 --rfs 0.60 --rfsAlpha 0.75 --max-train-batches 300 --eval-map-every 3 --eval-map-max-batches 150 --early-metric macro_map --early-stop-patience 8 --grad-clip 10.0 --amp bf16 --empty-cache-every 50 --print-freq 20 --log-file runs/retina/train_tuned_resume_rfs.log --log-console --resume runs/retina_rfs_balanced/last.pth  
 
 
 
@@ -240,15 +221,9 @@ python train.py \
 ---
 ## 8. validation
 # debug
-python evaluate_test.py \
-  --backend torch \
-  --model retinanet \
-  --ckpt runs/retina_rfs001/best.pth \
-  --test-ann ./data/coco/annotations_used/instances_train2017_debug500.json \
-  --test-images ./data/coco/train2017 \
-  --batch-size 8 --num-workers 4 \
-  --resize-short 512 \
-  --pr-plot runs/retina_rfs001/pr_curves_iou50_torch_traindebug.jpg
+python evaluate_test.py --backend torch --model retinanet --ckpt runs/retina_rfs_balanced/last.pth --test-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --test-
+images ./data/coco/train2017 --batch-size 8 --num-workers 4 --resize-short 800 --pr-plot runs/retina_rfs_balanced/pr_curves_iou
+50_torch.jpg
 
 python evaluate_test.py \
   --backend torch \

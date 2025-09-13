@@ -39,9 +39,11 @@ def coco_map_with_macro(model_name: str,
             break
         img_ids = [int(t["image_id"].item()) for t in targets]
 
-        if model_name == "retinanet":
-            # Use predict_batch_fn that already returns bboxes in original image coordinates
+        if predict_batch_fn is not None:
+            # Use provided predictor (handles resizing/original coords internally)
             batch_dets = predict_batch_fn(images, img_ids)
+        elif model_name == "retinanet":
+            batch_dets = []  # should not happen as RetinaNet path provides predictor
         else:
             model.eval()
             np_imgs = [(img.permute(1, 2, 0).clamp(0, 1).mul(255).byte().cpu().numpy()) for img in images]
@@ -52,7 +54,7 @@ def coco_map_with_macro(model_name: str,
             outputs = model(**enc)
             sizes = [(ds_val.imgid_to_img[i]["height"], ds_val.imgid_to_img[i]["width"]) for i in img_ids]
             sizes = torch.tensor(sizes, device=device)
-            processed = proc.post_process_object_detection(outputs, target_sizes=sizes)
+            processed = proc.post_process_object_detection(outputs, target_sizes=sizes, threshold=0.05)
             batch_dets = []
             for img_id, p in zip(img_ids, processed):
                 boxes = p["boxes"].detach().cpu().numpy()

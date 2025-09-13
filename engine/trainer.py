@@ -145,6 +145,9 @@ class Trainer:
             # Train one epoch
             model.train()
             running = 0.0
+            # Per-epoch aggregation of loss components (supports RetinaNet and DETR)
+            epoch_loss_sums: Dict[str, float] = {}
+            epoch_loss_count = 0
             clip_updates = 0
             clip_clipped = 0
             grad_norms: list = []
@@ -206,6 +209,15 @@ class Trainer:
                     self.scheduler.step()
 
                 running += float(loss.detach().cpu().item())
+                # Aggregate per-step component losses for epoch summary
+                if isinstance(loss_dict, dict):
+                    for k, v in loss_dict.items():
+                        try:
+                            val = float(v.detach().cpu().item()) if hasattr(v, "detach") else float(v)
+                        except Exception:
+                            continue
+                        epoch_loss_sums[k] = epoch_loss_sums.get(k, 0.0) + val
+                epoch_loss_count += 1
                 self.global_step += 1
 
                 if (bidx + 1) % args.print_freq == 0:
@@ -229,12 +241,35 @@ class Trainer:
                         self.writer.add_scalar("train/bbox_regression", reg_val, self.global_step)
                         self.writer.add_scalar("train/total", total_val, self.global_step)
                     else:
+                        # Generic logging: if multiple loss keys, print a compact summary
                         avg_loss = running / args.print_freq
-                        self.logger.info(
-                            f"[train] epoch {epoch+1} step {bidx+1} loss={avg_loss:.4f}"
-                        )
-                        self.writer.add_scalar("train/loss", avg_loss, self.global_step)
-                    running = 0.0
+                        if isinstance(loss_dict, dict) and any(k.startswith("loss") for k in loss_dict.keys()):
+                            parts = []
+                            # Include total loss if provided by the model, then common DETR parts
+                            for key in ("loss", "loss_ce", "loss_bbox", "loss_giou"):
+                                if key in loss_dict:
+                                    try:
+                                        parts.append(f"{key}:{float(loss_dict[key].detach().cpu().item()):.4f}")
+                                    except Exception:
+                                        pass
+                            parts_str = " ".join(parts) if parts else ""
+                            self.logger.info(
+                                f"Epoch: {epoch+1}/{args.epochs}, Batches: {bidx+1}/{self.steps_per_epoch}, {parts_str} total:{avg_loss:.4f}"
+                            )
+                            # TB scalars for components
+                            try:
+                                for k, v in loss_dict.items():
+                                    if k == "loss" or k.startswith("loss_"):
+                                        val = float(v.detach().cpu().item()) if hasattr(v, "detach") else float(v)
+                                        self.writer.add_scalar(f"train/{k}", val, self.global_step)
+                            except Exception:
+                                pass
+                        else:
+                            self.logger.info(
+                                f"[train] epoch {epoch+1} step {bidx+1} loss={avg_loss:.4f}"
+                            )
+                            self.writer.add_scalar("train/loss", avg_loss, self.global_step)
+                        running = 0.0
 
                 # Optionally smooth nvidia-smi memory readouts (no effect on real usage)
                 if args.empty_cache_every and ((bidx + 1) % args.empty_cache_every == 0):
@@ -253,6 +288,8 @@ class Trainer:
                 except Exception:
                     pass
 
+            # Epoch banner then gradient norm stats
+            self.logger.info(f"[epoch] {epoch+1}/{args.epochs}")
             # Gradient norm stats
             if grad_norms:
                 n = len(grad_norms)
@@ -272,8 +309,38 @@ class Trainer:
                     self.writer.add_scalar("train/grad_norm_max", mx, epoch)
                 except Exception:
                     pass
+                # Auto-clip: adjust next epoch's grad_clip based on p95
+                if getattr(self.args, "auto_clip", False):
+                    start_ep = max(1, int(getattr(self.args, "auto_clip_start_epoch", 1)))
+                    if (epoch + 1) >= start_ep:
+                        mult = float(getattr(self.args, "auto_clip_mult", 1.2))
+                        cmin = float(getattr(self.args, "auto_clip_min", 0.05))
+                        cmax = float(getattr(self.args, "auto_clip_max", 1.5))
+                        proposed = max(cmin, min(cmax, mult * float(p95)))
+                        self.logger.info(f"[auto-clip] next grad_clip -> {proposed:.3f} (p95={p95:.3f}, mult={mult})")
+                        try:
+                            self.writer.add_scalar("train/auto_clip_next", proposed, epoch)
+                        except Exception:
+                            pass
+                        # Set for next epoch (used directly in training loop)
+                        self.args.grad_clip = proposed
 
-            # Validation loss
+            # Epoch-end summary for component losses
+            if epoch_loss_count > 0 and epoch_loss_sums:
+                avg_items = {k: (v / epoch_loss_count) for k, v in epoch_loss_sums.items()}
+                # Print concise summary with common keys first
+                keys_order = [k for k in ("loss", "loss_ce", "loss_bbox", "loss_giou") if k in avg_items] + \
+                             [k for k in sorted(avg_items.keys()) if k not in ("loss", "loss_ce", "loss_bbox", "loss_giou")]
+                summary = " ".join([f"{k}:{avg_items[k]:.4f}" for k in keys_order])
+                self.logger.info(f"[epoch loss] {summary}")
+                # TensorBoard epoch-avg scalars
+                try:
+                    for k, v in avg_items.items():
+                        self.writer.add_scalar(f"train_epoch/{k}", v, epoch)
+                except Exception:
+                    pass
+
+            # Validation loss (after epoch/gradnorm/loss summary)
             val_loss = self._val_loss(max_batches=args.max_val_batches)
             self.writer.add_scalar("val/loss", val_loss, epoch)
             self.logger.info(f"[val] epoch {epoch+1} loss={val_loss:.4f}")
@@ -354,9 +421,9 @@ class Trainer:
                 bv = ckpt.get("best_val", self.best_val)
                 self.logger.info(f"[best] epoch={be}, val_loss={bv:.4f}")
 
-                # For DETR, build a predict closure with processor
+                # Prefer provided predictor; only fall back to internal DETR closure if absent
                 predict_fn = self.predict_batch
-                if self.model_name == "detr":
+                if predict_fn is None and self.model_name == "detr":
                     from transformers import DetrImageProcessor
                     proc = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
 
@@ -370,7 +437,7 @@ class Trainer:
                             enc["pixel_mask"] = enc["pixel_mask"].to(device)
                         outputs = model(**enc)
                         sizes = [(self.ds_val.imgid_to_img[int(i)]["height"], self.ds_val.imgid_to_img[int(i)]["width"]) for i in img_ids]
-                        processed = proc.post_process_object_detection(outputs, target_sizes=torch.tensor(sizes, device=device))
+                        processed = proc.post_process_object_detection(outputs, target_sizes=torch.tensor(sizes, device=device), threshold=0.05)
                         cat_ids_sorted_local = sorted([c["id"] for c in self.ds_val.categories])
                         results = []
                         for img_id, p in zip(img_ids, processed):

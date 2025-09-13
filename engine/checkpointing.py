@@ -18,7 +18,11 @@ def load_checkpoint_if_any(model, optimizer, scheduler, ckpt_path: Path, device)
     if ckpt_path is None or not ckpt_path.exists():
         return 0, float("inf"), None, None
     ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model"])
+    # Prefer assign=True on newer PyTorch to avoid meta-parameter copy warnings
+    try:
+        model.load_state_dict(ckpt["model"], assign=True)
+    except TypeError:
+        model.load_state_dict(ckpt["model"])
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
     if scheduler is not None and "scheduler" in ckpt and ckpt["scheduler"] is not None:
@@ -30,4 +34,3 @@ def load_checkpoint_if_any(model, optimizer, scheduler, ckpt_path: Path, device)
         f"[resume] Loaded checkpoint from {ckpt_path} at epoch {start_epoch} (best_val={best_val:.4f}, best_epoch={best_epoch})"
     )
     return start_epoch, best_val, best_epoch, ckpt.get("extra", None)
-

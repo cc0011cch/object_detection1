@@ -68,6 +68,19 @@ def main():
                     help="Mixed precision mode: auto (prefer bf16 on supported GPUs), fp16, bf16, or off")
     ap.add_argument("--empty-cache-every", type=int, default=0,
                     help="If >0, call torch.cuda.empty_cache() every N steps to smooth nvidia-smi memory")
+    # DETR image size caps
+    ap.add_argument("--detr-short", type=int, default=800, help="DETR processor shortest edge (pixels)")
+    ap.add_argument("--detr-max", type=int, default=800, help="DETR processor longest edge cap (pixels)")
+    # DETR regularization controls
+    ap.add_argument("--detr-grad-checkpoint", action="store_true", help="Enable gradient checkpointing in DETR")
+    ap.add_argument("--detr-dropout", type=float, default=None, help="Override DETR transformer dropout (e.g., 0.2)")
+    ap.add_argument("--detr-attn-dropout", type=float, default=None, help="Override DETR attention dropout (e.g., 0.2)")
+    # Auto-clip controls
+    ap.add_argument("--auto-clip", action="store_true", help="Enable automatic grad clip tuning per epoch based on last epoch's p95 grad-norm")
+    ap.add_argument("--auto-clip-mult", type=float, default=1.2, help="Multiplier for p95 to set next grad_clip")
+    ap.add_argument("--auto-clip-min", type=float, default=0.05, help="Lower bound for auto grad_clip")
+    ap.add_argument("--auto-clip-max", type=float, default=1.5, help="Upper bound for auto grad_clip")
+    ap.add_argument("--auto-clip-start-epoch", type=int, default=1, help="Start applying auto-clip at this 1-based epoch")
 
     # Logging/checkpointing/eval
     ap.add_argument("--warmup-steps", type=int, default=100)
@@ -204,6 +217,11 @@ def main():
         cat_ids_sorted=cat_ids_sorted,
         device=device,
         orig_size_map=orig_size_map,
+        detr_short=args.detr_short,
+        detr_max=args.detr_max,
+        detr_grad_ckpt=args.detr_grad_checkpoint,
+        detr_dropout=args.detr_dropout,
+        detr_attn_dropout=args.detr_attn_dropout,
     )
 
     # Param groups and trainer
