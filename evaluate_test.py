@@ -39,7 +39,7 @@ import numpy as np
 
 # project modules
 from train import build_model_and_helpers, collate_fn
-from dataset import CocoDetDataset
+from dataset import CocoDetDataset as CocoDetDatasetCls
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
@@ -235,7 +235,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ds = CocoDetDataset(
+    ds = CocoDetDatasetCls(
         images_dir=args.test_images,
         ann_json=args.test_ann,
         augment=False, use_albu=False,
@@ -318,7 +318,7 @@ def main():
                 from dataset import CocoDetDataset
                 # Build per-scale DLs by cloning dataset with target_size
                 for sz in tta_scales:
-                    ds_s = CocoDetDataset(ds.images_dir, ds.ann_json, augment=False, use_albu=False)
+                    ds_s = CocoDetDatasetCls(ds.images_dir, ds.ann_json, augment=False, use_albu=False)
                     try: ds_s.set_target_size(int(sz))
                     except Exception: pass
                     dl_s = DataLoader(
