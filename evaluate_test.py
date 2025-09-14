@@ -28,7 +28,7 @@ Usage example (ONNX):
 import argparse
 import io
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Callable
 
 import torch
 from torch.utils.data import DataLoader
@@ -36,10 +36,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import torch.nn.functional as F
 
 # project modules
 from train import build_model_and_helpers, collate_fn
-from dataset import CocoDetDataset as CocoDetDatasetCls
+from dataset import CocoDetDataset
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
@@ -132,6 +133,123 @@ def _nms_merge_per_image(dets: List[Dict[str, Any]], ow: int, oh: int, iou_thres
                 "score": float(items[i].get("score", 0.0)),
             })
     return merged
+
+
+def _resize_images_to_square(images: List[torch.Tensor], target: int) -> List[torch.Tensor]:
+    """Resize each CHW tensor so that max(H,W)=target, then pad to target x target.
+    Keeps value range and dtype; uses bilinear for resize and zero-pad bottom/right.
+    """
+    if target is None or int(target) <= 0:
+        return images
+    out: List[torch.Tensor] = []
+    for img in images:
+        c, h, w = img.shape
+        if max(h, w) == target:
+            # still ensure square pad if needed
+            new_h, new_w = h, w
+            resized = img
+        else:
+            s = float(target) / float(max(h, w))
+            new_h = int(round(h * s))
+            new_w = int(round(w * s))
+            resized = F.interpolate(img.unsqueeze(0), size=(new_h, new_w), mode="bilinear", align_corners=False).squeeze(0)
+        pad_bottom = int(target - new_h)
+        pad_right = int(target - new_w)
+        if pad_bottom > 0 or pad_right > 0:
+            padded = F.pad(resized, (0, pad_right, 0, pad_bottom), mode="constant", value=0.0)
+        else:
+            padded = resized
+        out.append(padded)
+    return out
+
+
+def _predict_with_hflip_merge(
+    predict_batch_fn,
+    images: List[torch.Tensor],
+    img_ids: List[int],
+    ow_map: Dict[int, int],
+    oh_map: Dict[int, int],
+    iou_thresh: float,
+    do_hflip: bool,
+) -> List[Dict[str, Any]]:
+    """Run base predict (and optional hflip) and merge per-image with NMS in original coords.
+    Assumes predict_batch_fn returns boxes already mapped to original coordinates.
+    """
+    dets_base = predict_batch_fn(images, img_ids)
+    dets_all = dets_base
+    if do_hflip:
+        images_flip = [torch.flip(img, dims=[2]) for img in images]
+        dets_flip = predict_batch_fn(images_flip, img_ids)
+        dets_flip_u = []
+        for d in dets_flip:
+            iid = int(d["image_id"])
+            ow = int(ow_map[iid])
+            x, y, w, h = d["bbox"]
+            x_new = max(0.0, float(ow) - float(x) - float(w))
+            d2 = dict(d); d2["bbox"] = [x_new, y, w, h]
+            dets_flip_u.append(d2)
+        dets_all = dets_base + dets_flip_u
+
+    # Per-image merge
+    by_img: Dict[int, List[Dict[str, Any]]] = {}
+    for d in dets_all:
+        by_img.setdefault(int(d["image_id"]), []).append(d)
+    merged = []
+    for iid, lst in by_img.items():
+        merged.extend(_nms_merge_per_image(lst, ow=int(ow_map[iid]), oh=int(oh_map[iid]), iou_thresh=float(iou_thresh)))
+    return merged
+
+
+def _tta_over_loader(
+    dl,
+    predict_batch_fn,
+    ds,
+    base_size: int,
+    tta_scales: List[int],
+    do_hflip: bool,
+    iou_thresh: float,
+    resize_images_fn=_resize_images_to_square,
+    scale_predict_fns: Optional[Dict[int, Callable[[List[torch.Tensor], List[int]], List[Dict[str, Any]]]]] = None,
+) -> List[Dict[str, Any]]:
+    """Generic TTA collector: base pass + optional multiscales, then final per-image merge.
+    predict_batch_fn must output boxes in original coordinates.
+    """
+    ow_map = {int(im["id"]): int(im["width"]) for im in ds.images}
+    oh_map = {int(im["id"]): int(im["height"]) for im in ds.images}
+
+    merged_all: List[Dict[str, Any]] = []
+
+    # Base pass (use images as-is)
+    for images, targets in dl:
+        img_ids = [int(t["image_id"].item()) for t in targets]
+        merged_batch = _predict_with_hflip_merge(
+            predict_batch_fn, images, img_ids, ow_map, oh_map, iou_thresh, do_hflip
+        )
+        merged_all.extend(merged_batch)
+
+    # Multiscale passes (resize in-memory; do not recreate dataset)
+    for sz in (tta_scales or []):
+        sz = int(sz)
+        for images, targets in dl:
+            img_ids = [int(t["image_id"].item()) for t in targets]
+            # If a scale-specific predictor is provided (e.g., DETR), use it and avoid pre-resize
+            if scale_predict_fns is not None and sz in scale_predict_fns:
+                pfn = scale_predict_fns[sz]
+                images_s = images
+            else:
+                pfn = predict_batch_fn
+                images_s = resize_images_fn(images, sz)
+            merged_batch = _predict_with_hflip_merge(pfn, images_s, img_ids, ow_map, oh_map, iou_thresh, do_hflip)
+            merged_all.extend(merged_batch)
+
+    # Final merge across all passes per image
+    detections: List[Dict[str, Any]] = []
+    by_img_all: Dict[int, List[Dict[str, Any]]] = {}
+    for d in merged_all:
+        by_img_all.setdefault(int(d["image_id"]), []).append(d)
+    for iid, lst in by_img_all.items():
+        detections.extend(_nms_merge_per_image(lst, ow=int(ow_map[iid]), oh=int(oh_map[iid]), iou_thresh=float(iou_thresh)))
+    return detections
 
 
 def summarize_and_per_class_ap(coco_gt: COCO, detections: List[Dict[str, Any]], iou_type="bbox"):
@@ -235,7 +353,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ds = CocoDetDatasetCls(
+    ds = CocoDetDataset(
         images_dir=args.test_images,
         ann_json=args.test_ann,
         augment=False, use_albu=False,
@@ -282,79 +400,36 @@ def main():
         if not args.tta_hflip and not tta_scales:
             detections = run_inference_torch(args.model, model, dl, ds, device, predict_batch_fn)
         else:
-            # Torch backend with optional hflip + multiscale
-            def infer_one_dl(local_dl):
-                out = []
-                ow_map = {int(im["id"]): int(im["width"]) for im in ds.images}
-                for images, targets in local_dl:
-                    img_ids = [int(t["image_id"].item()) for t in targets]
-                    dets_base = predict_batch_fn(images, img_ids)
-                    dets_all = dets_base
-                    if args.tta_hflip:
-                        images_flip = [torch.flip(img, dims=[2]) for img in images]
-                        dets_flip = predict_batch_fn(images_flip, img_ids)
-                        dets_flip_u = []
-                        for d in dets_flip:
-                            ow = ow_map[int(d["image_id"])]
-                            x, y, w, h = d["bbox"]
-                            x_new = max(0.0, float(ow) - float(x) - float(w))
-                            d2 = dict(d); d2["bbox"] = [x_new, y, w, h]
-                            dets_flip_u.append(d2)
-                        dets_all = dets_base + dets_flip_u
-                    by_img: Dict[int, List[Dict[str, Any]]] = {}
-                    for d in dets_all:
-                        by_img.setdefault(int(d["image_id"]), []).append(d)
-                    for iid, lst in by_img.items():
-                        ow = ow_map[int(iid)]
-                        oh = int(ds.imgid_to_img[int(iid)]["height"])
-                        merged = _nms_merge_per_image(lst, ow=ow, oh=oh, iou_thresh=float(args.tta_nms_iou))
-                        out.extend(merged)
-                return out
-
-            # Base scale (current dl)
-            merged_all = infer_one_dl(dl)
-            # Extra multiscale passes
-            if tta_scales:
-                from dataset import CocoDetDataset
-                # Build per-scale DLs by cloning dataset with target_size
-                for sz in tta_scales:
-                    ds_s = CocoDetDatasetCls(ds.images_dir, ds.ann_json, augment=False, use_albu=False)
-                    try: ds_s.set_target_size(int(sz))
-                    except Exception: pass
-                    dl_s = DataLoader(
-                        ds_s, batch_size=args.batch_size, shuffle=False,
-                        num_workers=args.num_workers, collate_fn=collate_fn,
-                        pin_memory=False, prefetch_factor=(2 if args.num_workers > 0 else None),
-                        persistent_workers=(args.num_workers > 0),
-                    )
-                    merged_all.extend(infer_one_dl(dl_s))
-            # Final merge across scales per image
-            by_img_all: Dict[int, List[Dict[str, Any]]] = {}
-            for d in merged_all:
-                by_img_all.setdefault(int(d["image_id"]), []).append(d)
-            detections = []
-            for iid, lst in by_img_all.items():
-                ow = int(ds.imgid_to_img[int(iid)]["width"]) ; oh = int(ds.imgid_to_img[int(iid)]["height"]) 
-                detections.extend(_nms_merge_per_image(lst, ow=ow, oh=oh, iou_thresh=float(args.tta_nms_iou)))
+            # Use generic TTA collector with in-memory resize
+            detections = _tta_over_loader(
+                dl=dl,
+                predict_batch_fn=predict_batch_fn,
+                ds=ds,
+                base_size=int(args.resize_short),
+                tta_scales=tta_scales,
+                do_hflip=bool(args.tta_hflip),
+                iou_thresh=float(args.tta_nms_iou),
+            )
 
     else:  # ONNX backend
         detections = []
         if args.model == "retinanet":
+            # Build a per-batch predictor that returns boxes in original coordinates
             onnx_model = ONNXRetinaNetWrapper(
                 onnx_path=args.onnx,
                 providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
                 class_ids=cat_ids_sorted,
                 score_thresh=0.3, iou_thresh=0.5,
             )
-            for images, targets in dl:
-                img_ids = [int(t["image_id"].item()) for t in targets]
+
+            def predict_retina_onnx_original(images: List[torch.Tensor], img_ids: List[int]):
                 dets = onnx_model.predict(images, img_ids)
-                # Scale boxes back to original size
+                # Scale boxes back to original size using the current images' sizes
                 sizes_in = {int(iid): tuple(images[idx].shape[-2:]) for idx, iid in enumerate(img_ids)}
-                scaled = []
+                out = []
                 for det in dets:
                     iid = int(det["image_id"])
-                    oh = int(ds.imgid_to_img[iid]["height"]) ; ow = int(ds.imgid_to_img[iid]["width"]) 
+                    oh = int(ds.imgid_to_img[iid]["height"]); ow = int(ds.imgid_to_img[iid]["width"]) 
                     ih, iw = sizes_in.get(iid, (oh, ow))
                     s = min(ih / max(1, oh), iw / max(1, ow))
                     new_h = int(round(oh * s)); new_w = int(round(ow * s))
@@ -364,74 +439,71 @@ def main():
                     x2 = max(0.0, min(x2, new_w - 1)); y2 = max(0.0, min(y2, new_h - 1))
                     if s > 0:
                         x1 /= s; y1 /= s; x2 /= s; y2 /= s
-                    det = dict(det)
-                    det["bbox"] = [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
-                    scaled.append(det)
-                detections.extend(scaled)
+                    d2 = dict(det)
+                    d2["bbox"] = [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
+                    out.append(d2)
+                return out
+
+            if not args.tta_hflip and not tta_scales:
+                for images, targets in dl:
+                    img_ids = [int(t["image_id"].item()) for t in targets]
+                    detections.extend(predict_retina_onnx_original(images, img_ids))
+            else:
+                detections = _tta_over_loader(
+                    dl=dl,
+                    predict_batch_fn=predict_retina_onnx_original,
+                    ds=ds,
+                    base_size=int(args.resize_short),
+                    tta_scales=tta_scales,
+                    do_hflip=bool(args.tta_hflip),
+                    iou_thresh=float(args.tta_nms_iou),
+                )
         else:  # DETR ONNX
             # Map image_id -> (H,W) originals for postprocess
             orig_size_map = {int(im["id"]): (int(im["height"]), int(im["width"])) for im in ds.images}
-            onnx_model = ONNXDetrWrapper(
+            base_wrapper = ONNXDetrWrapper(
                 onnx_path=args.onnx,
                 providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
                 class_ids=cat_ids_sorted,
                 score_thresh=0.05, detr_short=800, detr_max=800,
                 orig_size_map=orig_size_map,
             )
+
+            def predict_detr(images: List[torch.Tensor], img_ids: List[int]):
+                return base_wrapper.predict(images, img_ids)
+
             if not args.tta_hflip and not tta_scales:
                 for images, targets in dl:
                     img_ids = [int(t["image_id"].item()) for t in targets]
-                    dets = onnx_model.predict(images, img_ids)
-                    detections.extend(dets)
+                    detections.extend(predict_detr(images, img_ids))
             else:
-                detections = []
-                ow_map = {int(im["id"]): int(im["width"]) for im in ds.images}
-                def collect_for_wrapper(wrapper):
-                    out = []
-                    for images, targets in dl:
-                        img_ids = [int(t["image_id"].item()) for t in targets]
-                        dets_base = wrapper.predict(images, img_ids)
-                        dets_all = dets_base
-                        if args.tta_hflip:
-                            images_flip = [torch.flip(img, dims=[2]) for img in images]
-                            dets_flip = wrapper.predict(images_flip, img_ids)
-                            dets_flip_u = []
-                            for d in dets_flip:
-                                ow = ow_map[int(d["image_id"])]
-                                x, y, w, h = d["bbox"]
-                                x_new = max(0.0, float(ow) - float(x) - float(w))
-                                d2 = dict(d); d2["bbox"] = [x_new, y, w, h]
-                                dets_flip_u.append(d2)
-                            dets_all = dets_base + dets_flip_u
-                        by_img: Dict[int, List[Dict[str, Any]]] = {}
-                        for d in dets_all:
-                            by_img.setdefault(int(d["image_id"]), []).append(d)
-                        for iid, lst in by_img.items():
-                            ow = ow_map[int(iid)]
-                            oh = int(ds.imgid_to_img[int(iid)]["height"])
-                            out.extend(_nms_merge_per_image(lst, ow=ow, oh=oh, iou_thresh=float(args.tta_nms_iou)))
-                    return out
+                # Build per-scale predictors that change shortest/longest edge inside the wrapper
+                scale_predict: Dict[int, Callable[[List[torch.Tensor], List[int]], List[Dict[str, Any]]]] = {}
+                for sz in (tta_scales or []):
+                    wrapper_s = ONNXDetrWrapper(
+                        onnx_path=args.onnx,
+                        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                        class_ids=cat_ids_sorted,
+                        score_thresh=0.05, detr_short=int(sz), detr_max=int(sz),
+                        orig_size_map=orig_size_map,
+                    )
 
-                # Base size
-                merged_all = collect_for_wrapper(onnx_model)
-                # Additional multiscale sizes
-                if tta_scales:
-                    for sz in tta_scales:
-                        onnx_model_s = ONNXDetrWrapper(
-                            onnx_path=args.onnx,
-                            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-                            class_ids=cat_ids_sorted,
-                            score_thresh=0.05, detr_short=int(sz), detr_max=int(sz),
-                            orig_size_map=orig_size_map,
-                        )
-                        merged_all.extend(collect_for_wrapper(onnx_model_s))
-                # Final merge across scales
-                by_img_all: Dict[int, List[Dict[str, Any]]] = {}
-                for d in merged_all:
-                    by_img_all.setdefault(int(d["image_id"]), []).append(d)
-                for iid, lst in by_img_all.items():
-                    ow = int(ds.imgid_to_img[int(iid)]["width"]) ; oh = int(ds.imgid_to_img[int(iid)]["height"]) 
-                    detections.extend(_nms_merge_per_image(lst, ow=ow, oh=oh, iou_thresh=float(args.tta_nms_iou)))
+                    def make_fn(w):
+                        return lambda images, img_ids, _w=w: _w.predict(images, img_ids)
+                    scale_predict[int(sz)] = make_fn(wrapper_s)
+
+                detections = _tta_over_loader(
+                    dl=dl,
+                    predict_batch_fn=predict_detr,
+                    ds=ds,
+                    base_size=int(args.resize_short),
+                    tta_scales=tta_scales,
+                    do_hflip=bool(args.tta_hflip),
+                    iou_thresh=float(args.tta_nms_iou),
+                    # For DETR, avoid pre-resizing; use per-scale predictor
+                    resize_images_fn=lambda imgs, s: imgs,
+                    scale_predict_fns=scale_predict if tta_scales else None,
+                )
 
     coco_gt = COCO(args.test_ann)
     results = summarize_and_per_class_ap(coco_gt, detections)

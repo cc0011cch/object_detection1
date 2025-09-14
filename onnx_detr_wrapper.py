@@ -13,6 +13,96 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 import onnxruntime as ort
 import torch
+import cv2
+
+
+class _MinimalDetrProcessor:
+    """Lightweight DETR pre/post without transformers dependency.
+
+    - preprocess(images, size): resizes each HWC uint8 image to obey
+      shortest_edge/longest_edge, normalizes with ImageNet mean/std,
+      pads to the max H,W in batch, returns NCHW float32 and mask.
+    - post_process_object_detection(outputs, target_sizes, threshold):
+      converts normalized cxcywh boxes to xyxy absolute coords in the
+      provided original sizes, filters by score threshold, returns a
+      list of dicts with 'boxes','scores','labels' (torch tensors).
+    """
+
+    def __init__(self,
+                 mean=(0.485, 0.456, 0.406),
+                 std=(0.229, 0.224, 0.225)):
+        self.mean = np.array(mean, dtype=np.float32).reshape(3, 1, 1)
+        self.std = np.array(std, dtype=np.float32).reshape(3, 1, 1)
+
+    def _resize_keep_ar(self, img: np.ndarray, shortest_edge: int, longest_edge: int) -> np.ndarray:
+        h, w = img.shape[:2]
+        if shortest_edge is None or shortest_edge <= 0:
+            shortest_edge = min(h, w)
+        if longest_edge is None or longest_edge <= 0:
+            longest_edge = max(h, w)
+        scale = min(float(shortest_edge) / max(1.0, float(min(h, w))),
+                    float(longest_edge) / max(1.0, float(max(h, w))))
+        new_h = max(1, int(round(h * scale)))
+        new_w = max(1, int(round(w * scale)))
+        if new_h == h and new_w == w:
+            return img
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    def preprocess(self, images: List[np.ndarray], size: Dict[str, int]):
+        se = int(size.get("shortest_edge", 800))
+        le = int(size.get("longest_edge", 800))
+        proc: List[np.ndarray] = []
+        sizes: List[Tuple[int, int]] = []
+        for im in images:
+            im = self._resize_keep_ar(im, se, le)
+            h, w = im.shape[:2]
+            sizes.append((h, w))
+            # HWC uint8 -> CHW float32 in [0,1]
+            chw = im.transpose(2, 0, 1).astype(np.float32) / 255.0
+            # normalize
+            chw = (chw - self.mean) / self.std
+            proc.append(chw)
+        max_h = max(s[0] for s in sizes)
+        max_w = max(s[1] for s in sizes)
+        B = len(proc)
+        pixel_values = np.zeros((B, 3, max_h, max_w), dtype=np.float32)
+        pixel_mask = np.zeros((B, max_h, max_w), dtype=np.int64)
+        for i, (chw, (h, w)) in enumerate(zip(proc, sizes)):
+            pixel_values[i, :, :h, :w] = chw
+            pixel_mask[i, :h, :w] = 1
+        return {"pixel_values": pixel_values, "pixel_mask": pixel_mask}
+
+    @staticmethod
+    def _box_cxcywh_to_xyxy(x: torch.Tensor) -> torch.Tensor:
+        cx, cy, w, h = x.unbind(-1)
+        x1 = cx - 0.5 * w
+        y1 = cy - 0.5 * h
+        x2 = cx + 0.5 * w
+        y2 = cy + 0.5 * h
+        return torch.stack([x1, y1, x2, y2], dim=-1)
+
+    def post_process_object_detection(self, outputs_like: Dict[str, torch.Tensor],
+                                      target_sizes: torch.Tensor,
+                                      threshold: float = 0.05):
+        logits: torch.Tensor = outputs_like["logits"]  # [B,Q,C]
+        boxes: torch.Tensor = outputs_like["pred_boxes"]  # [B,Q,4] normalized cxcywh
+        prob = logits.softmax(-1)
+        prob = prob[..., :-1]  # drop no-object class
+        scores, labels = prob.max(-1)
+        boxes_xyxy = self._box_cxcywh_to_xyxy(boxes)
+        results = []
+        for i, (b, s, l) in enumerate(zip(boxes_xyxy, scores, labels)):
+            h, w = int(target_sizes[i, 0].item()), int(target_sizes[i, 1].item())
+            scale = torch.tensor([w, h, w, h], dtype=b.dtype)
+            b_abs = b * scale
+            keep = s > float(threshold)
+            results.append({
+                "boxes": b_abs[keep],
+                "scores": s[keep],
+                "labels": l[keep],
+            })
+        return results
+
 
 
 class ONNXDetrWrapper:
@@ -26,8 +116,6 @@ class ONNXDetrWrapper:
         detr_max: int = 800,
         orig_size_map: Optional[Dict[int, Tuple[int, int]]] = None,
     ):
-        from transformers import DetrImageProcessor
-
         requested = providers or ["CUDAExecutionProvider", "CPUExecutionProvider"]
         available = ort.get_available_providers()
         chosen = [p for p in requested if p in available] or ["CPUExecutionProvider"]
@@ -39,7 +127,8 @@ class ONNXDetrWrapper:
 
         self.class_ids = class_ids or []  # kept only for parity with retina path
         self.score_thresh = float(score_thresh)
-        self.processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+        # Minimal processor that avoids from_pretrained dependency and network calls
+        self.processor = _MinimalDetrProcessor()
         self.size_kwargs = {"shortest_edge": int(detr_short), "longest_edge": int(detr_max)}
         self.orig_size_map = orig_size_map or {}
 
@@ -50,14 +139,12 @@ class ONNXDetrWrapper:
 
     def predict(self, images: List[torch.Tensor], img_ids: List[int]):
         # Convert to numpy images for the processor (uint8 HWC)
-        np_imgs = [
-            (img.permute(1, 2, 0).clamp(0, 1).mul(255).byte().cpu().numpy()) for img in images
-        ]
-        enc = self.processor(images=np_imgs, return_tensors="pt", size=self.size_kwargs)
-        pixel_values = enc["pixel_values"].numpy().astype(np.float32, copy=False)
+        np_imgs = [(img.permute(1, 2, 0).clamp(0, 1).mul(255).byte().cpu().numpy()) for img in images]
+        enc = self.processor.preprocess(np_imgs, size=self.size_kwargs)
+        pixel_values = enc["pixel_values"].astype(np.float32, copy=False)
         ort_inputs = {"pixel_values": pixel_values}
-        if self.has_mask and "pixel_mask" in enc:
-            ort_inputs["pixel_mask"] = enc["pixel_mask"].numpy().astype(np.int64, copy=False)
+        if self.has_mask and ("pixel_mask" in enc):
+            ort_inputs["pixel_mask"] = enc["pixel_mask"].astype(np.int64, copy=False)
 
         logits, pred_boxes = self.sess.run(["logits", "pred_boxes"], ort_inputs)
 
@@ -79,9 +166,7 @@ class ONNXDetrWrapper:
                 sizes.append((int(oh), int(ow)))
         sizes_t = torch.tensor(sizes, dtype=torch.long)
 
-        processed = self.processor.post_process_object_detection(
-            outputs_like, target_sizes=sizes_t, threshold=self.score_thresh
-        )
+        processed = self.processor.post_process_object_detection(outputs_like, target_sizes=sizes_t, threshold=self.score_thresh)
 
         # Convert to COCO detections (xywh in original coords)
         dets = []
@@ -103,4 +188,3 @@ class ONNXDetrWrapper:
                     "score": float(s),
                 })
         return dets
-
