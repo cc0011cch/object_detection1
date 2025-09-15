@@ -252,3 +252,22 @@ python tools/visualize_compare_predictions.py \
 Notes:
 - `--debug-overlay` draws a yellow band with sizes and a rectangle showing the effective resized (unpadded) input region mapped back to original coordinates. This helps diagnose any scaling/padding mismatch.
 - Torch and ONNX paths both use the standard DETR policy (shortest=800, longest≤1333) inside the visualizer.
+
+---
+
+## Models via Git LFS (optional)
+
+If the repo stores model checkpoints via Git LFS, you can pull only the model folders without downloading all LFS objects:
+
+```
+# one-time on your machine
+git lfs install
+
+# inside the repo (host or container at /workspace)
+bash scripts/download_models.sh
+
+# or specify exact include patterns
+bash scripts/download_models.sh "runs/retina_rfs_balanced1/*,runs/detr_debug500_rfsAlbu/*"
+```
+
+The script verifies git-lfs is installed, enables LFS smudge/clean filters, pulls the specified patterns, and lists the resulting files.
