@@ -206,6 +206,9 @@ python train.py \
 ### (d) DETR
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model detr --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json --val-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --train-images ./data/coco/train2017 --val-images ./data/coco/train2017 --epochs 60 --batch-size 15 --num-workers 2 --prefetch-factor 2 --resize-short 0 --detr-short 800 --detr-max 800 --detr-grad-checkpoint --detr-dropout 0.1 --detr-attn-dropout 0.1 --head-lr 2e-4 --backbone-lr 2e-5 --weight-decay 5e-4 --warmup-steps 1000 --grad-clip 0.1 --amp auto --rfs 0.6 --rfsAlpha 0.75 --eval-map-every 5 --eval-map-max-batches 100 --early-metric macro_map --early-stop-patience 10 --print-freq 20 --log-file runs/detr_debug/train_debug500_rfs.log --log-console --out runs/detr_debug500_rfs
 
+nohup env OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model detr --train-ann ./data/coco/annotations_used/instances_train2017_debug500.json --val-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --train-images ./data/coco/train2017 --val-images ./data/coco/train2017 --epochs 100 --batch-size 15 --num-workers 2 --prefetch-factor 2 --resize-short 0 --detr-short 800 --detr-max 800 --detr-grad-checkpoint --detr-dropout 0.05 --detr-attn-dropout 0.05 --head-lr 2e-4 --backbone-lr 2e-5 --weight-decay 5e-4  --albu --albu-strength light --warmup-steps 1000 --auto-clip --auto-clip-mult 1.15 --auto-clip-min 100 --auto-clip-max 3000 --auto-clip-start-epoch 1 --amp auto --rfs 0.6 --rfsAlpha 0.75 --eval-map-every 1 --eval-map-max-batches 150 --early-metric macro_ap50 --early-stop-patience 10 --print-freq 20 --log-file runs/detr_debug/train_debug500_rfsAlbu.log --log-console --out runs/detr_debug500_rfsAlbu 
+
+
 ## debug run
  OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python train.py --model detr --train-ann ./data/coco/annotations_used/instances_train2017_debug.json --val-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --train-images ./data/coco/train2017 --val-images ./data/coco/train2017 --epochs 50 --batch-size 10 --num-workers 2 --prefetch-factor 2 --resize-short 0 --detr-short 800 --detr-max 800 --detr-grad-checkpoint --detr-dropout 0.1 --detr-attn-dropout 0.1 --head-lr 2e-4 --backbone-lr 2e-5 --weight-decay 5e-4 --warmup-steps 1000 --grad-clip 0.1 --amp auto --eval-map-every 3 --eval-map-max-batches 30 --early-metric macro_map --early-stop-patience 8 --print-freq 10 --log-file runs/detr_debug/train_long.log --log-console --out runs/detr_debug
 
@@ -224,15 +227,25 @@ python evaluate_test.py --backend torch --model retinanet --ckpt runs/retina_rfs
 images ./data/coco/train2017 --batch-size 8 --num-workers 4 --resize-short 800 --pr-plot runs/retina_rfs_balanced/pr_curves_iou
 50_torch.jpg
 
+ python evaluate_test.py --backend torch --model retinanet --ckpt runs/retina_rfs_balanced1/last.pth --test-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --test-images ./data/coco/train2017 --batch-size 18 --num-workers 4 --resize-short 0 --pr-plot runs/retina/Eva_pylast_pr_all_iou50.jpg --csv-out runs/retina/Eva_pylast.csv
+
+python evaluate_test.py --backend torch --model retinanet --ckpt runs/retina_rfs_balanced1/last.pth --test-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --test-images ./data/coco/train2017 --batch-size 18 --num-workers 4 --tta-hflip --tta-nms-iou 0.6 --resize-short 0 --pr-plot runs/retina/Eva_pylast_hflip_pr_all_iou50.jpg --csv-out runs/retina/Eva_pylast_tta_hflip.csv
+
+python evaluate_test.py --backend onnx --model retinanet --onnx runs/retina_rfs_balanced1/retinanet_last.onnx --test-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --test-images ./data/coco/train2017 --batch-size 15 --num-workers 4 --resize-short 0 --retina-onnx-score 0.05 --retina-onnx
+-nms 0.5 --pr-plot runs/retina/Eva_onnxlast_pr_all_iou50.jpg --csv-out runs/retina/Eva_onnxlast.csv
+
+## DETR
+python evaluate_test.py --backend torch --model detr --ckpt runs/detr_debug500_rfsAlbu/last.pth --test-ann ./data/coco/annotations_used/instances_train2017_valdebug50.json --test-images ./data/coco/train2017 --batch-size 8 --num-workers 4 --resize-short 0 --csv-out runs/detr/Eva_pylast.csv --pr-plot runs/detr/Eva_pylast_pr_all_iou50.jpg
+
 python evaluate_test.py \
-  --backend torch \
-  --model retinanet \
-  --ckpt runs/retina_rfs001/best.pth \
-  --test-ann ./data/coco/annotations_used/instances_test2017_subset_nogray.json \
-  --test-images ./data/coco/val2017 \
-  --batch-size 8 --num-workers 4 \
-  --resize-short 512 \
-  --pr-plot runs/retina_rfs001/pr_curves_iou50_torch.jpg
+    --backend onnx --model detr \
+    --onnx runs/detr_debug500_rfsAlbu/detr_best.onnx \
+    --test-ann data/coco/annotations_used/instances_train2017_valdebug50.json \
+    --test-images data/coco/train2017 \
+    --batch-size 8 --num-workers 4 --resize-short 0 \
+    --csv-out runs/detr/Eva_onnx.csv \
+    --pr-plot runs/detr/Eva_onnx_pr_all_iou50.jpg
+
 ## 9. onnx
 python export_retinanet_onnx.py \
   --ckpt runs/retina_rfs001/best.pth \
@@ -252,6 +265,11 @@ python evaluate_test.py \
   --batch-size 8 --num-workers 4 \
   --resize-short 512 \
   --pr-plot runs/retina_rfs001/pr_curves_iou50Val_onnx.jpg
+
+
+## visualize the detection result
+## DETR
+python tools/visualize_compare_predictions.py --images ./data/coco/train2017 --ann ./data/coco/annotations_used/instances_train2017_debug500.json --model detr --torch-ckpt runs/detr_debug500_rfsAlbu/best.pth --onnx runs/detr_debug500_rfsAlbu/detr_best.onnx --num 12 --out-dir runs/viz_detr_best --torch-thresh 0.5 --onnx-thresh 0.5 --topk 50
 
 ## 11. TensorBoard (with Remote Access)
 
