@@ -1,0 +1,38 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# System deps for building wheels (pycocotools), OpenCV runtime, etc.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential \
+    python3-dev \
+    git \
+    curl \
+    ca-certificates \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Core Python deps (CPU build)
+RUN python -m pip install --upgrade pip wheel setuptools && \
+    pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+        torch==2.3.1+cpu torchvision==0.18.1+cpu torchaudio==2.3.1+cpu && \
+    pip install \
+        onnx onnxruntime \
+        numpy pillow matplotlib tqdm pandas \
+        opencv-python-headless \
+        cython \
+        pycocotools \
+        tensorboard \
+        transformers==4.41.2 \
+        albumentations
+
+# Default shell
+CMD ["bash"]

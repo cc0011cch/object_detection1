@@ -1,0 +1,35 @@
+name: objdet
+
+services:
+  app-cpu:
+    profiles: ["cpu"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    image: objdet:cpu
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace:delegated
+    command: bash
+
+  app-gpu:
+    profiles: ["gpu"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    image: objdet:gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    # For Compose v2.3+, simpler: `gpus: all`
+    gpus: all
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace:delegated
+    environment:
+      - PYTHONUNBUFFERED=1
+    shm_size: 2g
+    command: bash
+

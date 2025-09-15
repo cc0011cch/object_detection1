@@ -27,6 +27,7 @@ Examples:
     --dynamo
 """
 import argparse
+import warnings
 from typing import List, Tuple
 
 import torch
@@ -224,19 +225,39 @@ def main():
         "anchors_xyxy": {0: "batch", 1: "num_anchors"},
     }
 
-    torch.onnx.export(
-        export_mod,
-        dummy,
-        args.out,
-        input_names=["images"],
-        output_names=["cls_logits", "bbox_deltas", "anchors_xyxy"],
-        opset_version=args.opset,
-        do_constant_folding=True,
-        dynamic_axes=dynamic_axes,
-        dynamo=args.dynamo,  # pass --dynamo to use the new exporter
-        training=torch.onnx.TrainingMode.EVAL,
-    )
+    # Export (with graceful fallback if dynamo exporter fails)
+    def _export_with(dynamo_flag: bool):
+        torch.onnx.export(
+            export_mod,
+            dummy,
+            args.out,
+            input_names=["images"],
+            output_names=["cls_logits", "bbox_deltas", "anchors_xyxy"],
+            opset_version=args.opset,
+            do_constant_folding=True,
+            dynamic_axes=dynamic_axes if not dynamo_flag else dynamic_axes,  # keep for BC; ORT ignores names
+            dynamo=dynamo_flag,
+            training=torch.onnx.TrainingMode.EVAL,
+        )
 
+    tried_fallback = False
+    if args.dynamo:
+        try:
+            # PyTorch warns that dynamic_axes is discouraged with dynamo; keep as-is and rely on shapes.
+            _export_with(True)
+        except Exception as e:
+            warnings.warn(
+                "Dynamo export failed; falling back to legacy exporter. "
+                "This is common with torchvision detection utilities like AnchorGenerator.\n"
+                f"Reason: {type(e).__name__}: {e}"
+            )
+            tried_fallback = True
+            _export_with(False)
+    else:
+        _export_with(False)
+
+    if tried_fallback:
+        print("[OK] Exported with legacy exporter after dynamo fallback.")
     print(f"[OK] Exported ONNX to: {args.out}")
     print("    Inputs : images [B,3,H,W] (float32, ImageNet-normalized)")
     print("    Outputs: cls_logits [B,N,C], bbox_deltas [B,N,4], anchors_xyxy [B,N,4]")

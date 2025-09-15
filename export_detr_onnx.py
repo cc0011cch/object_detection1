@@ -25,7 +25,8 @@ from models.factory import HF_AVAILABLE
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="detr_resnet50.onnx", help="Output ONNX path")
-    ap.add_argument("--num-labels", type=int, default=None, help="Override number of labels (default from HF config)")
+    ap.add_argument("--ckpt", default=None, help="Optional path to a fine-tuned checkpoint (best.pth/.pt)")
+    ap.add_argument("--num-labels", type=int, default=None, help="Number of object classes for the head (required when --ckpt is given if it differs from HF default)")
     ap.add_argument("--opset", type=int, default=13)
     ap.add_argument("--height", type=int, default=800)
     ap.add_argument("--width", type=int, default=800)
@@ -35,6 +36,10 @@ def main():
     from transformers import DetrForObjectDetection, DetrConfig
 
     cfg = DetrConfig.from_pretrained("facebook/detr-resnet-50")
+    # If exporting a fine-tuned checkpoint, encourage specifying num_labels to match training
+    if args.ckpt is not None and args.num_labels is None:
+        print("[warn] --ckpt provided without --num-labels. Falling back to HF default;"
+              " set --num-labels to your dataset class count to ensure head dims match.")
     if args.num_labels is not None:
         cfg.num_labels = int(args.num_labels)
 
@@ -44,6 +49,45 @@ def main():
         ignore_mismatched_sizes=True,
         low_cpu_mem_usage=False,
     )
+    # Optionally load fine-tuned weights from our training checkpoint
+    if args.ckpt is not None:
+        import torch
+        ckpt_path = Path(args.ckpt)
+        if ckpt_path.is_dir():
+            # Common filenames inside a run dir
+            for name in ("best.pth", "best.pt", "last.pth", "last.pt"):
+                cand = ckpt_path / name
+                if cand.exists():
+                    print(f"[info] --ckpt points to a directory; using {cand}")
+                    ckpt_path = cand
+                    break
+        elif not ckpt_path.exists():
+            # Try common extension swap (.pt <-> .pth)
+            alts = []
+            if ckpt_path.suffix == ".pt":
+                alts.append(ckpt_path.with_suffix(".pth"))
+            elif ckpt_path.suffix == ".pth":
+                alts.append(ckpt_path.with_suffix(".pt"))
+            for a in alts:
+                if a.exists():
+                    print(f"[info] Checkpoint not found at {ckpt_path}; using {a}")
+                    ckpt_path = a
+                    break
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}. Pass a valid file or the run directory.")
+
+        ckpt = torch.load(str(ckpt_path), map_location="cpu")
+        state = ckpt.get("model", ckpt)
+        # Prefer strict load when shapes match; fall back to non-strict for resilience
+        try:
+            model.load_state_dict(state, assign=True)
+        except TypeError:
+            try:
+                model.load_state_dict(state, strict=True)
+            except Exception:
+                missing, unexpected = model.load_state_dict(state, strict=False)
+                print(f"[warn] Non-strict load: missing={len(missing)}, unexpected={len(unexpected)}")
+        print(f"[OK] Loaded fine-tuned weights from: {ckpt_path}")
     model.eval()
 
     class Wrapper(torch.nn.Module):
@@ -87,4 +131,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

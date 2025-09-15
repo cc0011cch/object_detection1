@@ -83,7 +83,8 @@ class _MinimalDetrProcessor:
 
     def post_process_object_detection(self, outputs_like: Dict[str, torch.Tensor],
                                       target_sizes: torch.Tensor,
-                                      threshold: float = 0.05):
+                                      threshold: float = 0.05,
+                                      input_sizes: Optional[List[Tuple[int, int]]] = None):
         logits: torch.Tensor = outputs_like["logits"]  # [B,Q,C]
         boxes: torch.Tensor = outputs_like["pred_boxes"]  # [B,Q,4] normalized cxcywh
         prob = logits.softmax(-1)
@@ -92,9 +93,22 @@ class _MinimalDetrProcessor:
         boxes_xyxy = self._box_cxcywh_to_xyxy(boxes)
         results = []
         for i, (b, s, l) in enumerate(zip(boxes_xyxy, scores, labels)):
-            h, w = int(target_sizes[i, 0].item()), int(target_sizes[i, 1].item())
-            scale = torch.tensor([w, h, w, h], dtype=b.dtype)
-            b_abs = b * scale
+            # If provided, use the actual unpadded input size (h_in,w_in) to undo normalization
+            if input_sizes is not None and i < len(input_sizes) and input_sizes[i] is not None:
+                h_in, w_in = int(input_sizes[i][0]), int(input_sizes[i][1])
+                in_scale = torch.tensor([w_in, h_in, w_in, h_in], dtype=b.dtype)
+                b = b * in_scale
+                # Then scale from input size to target (original) size
+                h_t, w_t = int(target_sizes[i, 0].item()), int(target_sizes[i, 1].item())
+                ratio = torch.tensor([w_t / max(1.0, float(w_in)),
+                                      h_t / max(1.0, float(h_in)),
+                                      w_t / max(1.0, float(w_in)),
+                                      h_t / max(1.0, float(h_in))], dtype=b.dtype)
+                b_abs = b * ratio
+            else:
+                h_t, w_t = int(target_sizes[i, 0].item()), int(target_sizes[i, 1].item())
+                scale = torch.tensor([w_t, h_t, w_t, h_t], dtype=b.dtype)
+                b_abs = b * scale
             keep = s > float(threshold)
             results.append({
                 "boxes": b_abs[keep],
@@ -136,6 +150,8 @@ class ONNXDetrWrapper:
         self.input_names = {i.name for i in self.sess.get_inputs()}
         self.has_mask = ("pixel_mask" in self.input_names)
         self.out_names = [o.name for o in self.sess.get_outputs()]
+        # Debug info from last predict call
+        self.last_debug: Dict[int, Dict[str, Tuple[int, int]]] = {}
 
     def predict(self, images: List[torch.Tensor], img_ids: List[int]):
         # Convert to numpy images for the processor (uint8 HWC)
@@ -166,7 +182,39 @@ class ONNXDetrWrapper:
                 sizes.append((int(oh), int(ow)))
         sizes_t = torch.tensor(sizes, dtype=torch.long)
 
-        processed = self.processor.post_process_object_detection(outputs_like, target_sizes=sizes_t, threshold=self.score_thresh)
+        # Infer actual unpadded input sizes from the pixel_mask if available
+        input_sizes: Optional[List[Tuple[int, int]]] = None
+        if "pixel_mask" in enc:
+            input_sizes = []
+            pm = enc["pixel_mask"].astype(np.int64, copy=False)
+            for i in range(pm.shape[0]):
+                mask = pm[i] > 0
+                h_in = int(mask.any(axis=1).sum())
+                w_in = int(mask.any(axis=0).sum())
+                input_sizes.append((h_in, w_in))
+
+        processed = self.processor.post_process_object_detection(outputs_like, target_sizes=sizes_t, threshold=self.score_thresh, input_sizes=input_sizes)
+
+        # Save debug information per image id
+        try:
+            self.last_debug = {}
+            Hpad = int(pixel_values.shape[2]); Wpad = int(pixel_values.shape[3])
+            for idx, iid in enumerate(img_ids):
+                oh, ow = sizes[idx]
+                if input_sizes is not None and idx < len(input_sizes):
+                    h_in, w_in = input_sizes[idx]
+                else:
+                    h_in, w_in = oh, ow
+                # approximate actual scale used (kept AR)
+                s = min(float(h_in) / max(1.0, float(oh)), float(w_in) / max(1.0, float(ow)))
+                self.last_debug[int(iid)] = {
+                    "orig": (int(oh), int(ow)),
+                    "input": (int(h_in), int(w_in)),
+                    "padded": (int(Hpad), int(Wpad)),
+                    "scale": s,
+                }
+        except Exception:
+            pass
 
         # Convert to COCO detections (xywh in original coords)
         dets = []
